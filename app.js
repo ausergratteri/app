@@ -113,6 +113,7 @@ async function carica() {
       RANK[S.realRole] >= 2 ? q("tesserati").order("nome") : Promise.resolve({data: []})]);
     const err = r.find(x => x.error); if (err) throw err.error;
     [att, ass, ades, post, imp] = r.map(x => x.data);
+    ades = (ades || []).map(a => ({...a, acc: accSicuri(a.acc)}));
     S.cont = {}; (r[5].data || []).forEach(c => S.cont[c.attivita_id] = c.persone);
     prof = r[6].data || []; S.foto = r[7].data || []; S.tesserati = r[8].data || [];
   } else {
@@ -310,7 +311,7 @@ function card(e) {
 function hero(e) {
   const img = e.immagine, tot = totale(e.id);
   return `<button class="hero t-${e.tipo}" data-act="open" data-k="${e.tipo === "assemblea" ? "assemblea" : "evento"}" data-id="${e.id}">
-    <div class="img ${img ? "photo" : ""}" ${img ? `style="background-image:url('${esc(img)}')"` : ""}><span class="count">${tot} ${tot === 1 ? "iscritto" : "iscritti"}</span></div>
+    <div class="img ${img ? "photo" : ""}" ${img ? `style="background-image:url('${esc(urlCss(img))}')"` : ""}><span class="count">${tot} ${tot === 1 ? "iscritto" : "iscritti"}</span></div>
     <div class="in"><div class="pills"><span class="pill ${e.tipo}">${TIPI[e.tipo]}</span>${mia(e.id) ? '<span class="pill ok">✓ Ci sei</span>' : ""}</div>
     <h3>${esc(e.titolo)}</h3>
     <div class="meta">${esc(fmtLong(e.data))}${e.ora ? ", " + esc(fmtOra(e.ora)) : ""}${e.luogo ? " · " + esc(e.luogo) : ""}</div></div></button>`;
@@ -321,7 +322,7 @@ function vHome() {
   const first = prossimi[0];
   const posts = Object.values(S.post).sort((a, b) => (b.data || "").localeCompare(a.data || "")).slice(0, 2);
   const c = cfg();
-  const soc = [["facebook","Facebook",I.fb],["instagram","Instagram",I.ig],["whatsapp","WhatsApp",I.wa]].filter(([k]) => c[k]);
+  const soc = [["facebook","Facebook",I.fb],["instagram","Instagram",I.ig],["whatsapp","WhatsApp",I.wa]].filter(([k]) => linkSicuro(c[k]));
   return `
   <section class="sec" aria-label="Prossimo appuntamento"><div class="sechead"><h2>Prossimo appuntamento</h2></div>
     ${first ? hero(first) : '<div class="empty">Nessun appuntamento in programma.</div>'}</section>
@@ -329,7 +330,7 @@ function vHome() {
   <section class="sec"><div class="sechead"><h2>Dalla bacheca</h2><button class="link" data-act="tab" data-v="bacheca">Apri bacheca</button></div>
     ${posts.length ? posts.map(postCard).join("") : '<div class="empty">Nessun avviso per ora.</div>'}</section>
   ${ultimeFoto()}
-  ${soc.length ? `<section class="sec"><div class="sechead"><h2>Seguici</h2></div><div class="social">${soc.map(([k,l,ic]) => `<a class="sbtn" href="${esc(c[k])}" target="_blank" rel="noopener">${ic}${l}</a>`).join("")}</div></section>` : ""}
+  ${soc.length ? `<section class="sec"><div class="sechead"><h2>Seguici</h2></div><div class="social">${soc.map(([k,l,ic]) => `<a class="sbtn" href="${esc(linkSicuro(c[k]))}" target="_blank" rel="noopener">${ic}${l}</a>`).join("")}</div></section>` : ""}
   <section class="sec"><div class="row"><button class="btn ghost" data-act="mio-pin">Cambia il mio PIN</button><button class="btn ghost" data-act="esci">Esci dall'app</button></div></section>`;
 }
 
@@ -391,7 +392,7 @@ function postCard(p) {
   return `<article class="post">${p.immagine ? `<img src="${esc(p.immagine)}" alt="">` : ""}
     <div class="in"><div class="pills"><span class="pill ${p.tipo === "avviso" ? "warn" : ""}">${lab}</span><span class="pill">${esc(d)}</span></div>
     ${p.titolo ? `<h3>${esc(p.titolo)}</h3>` : ""}<p>${esc(p.testo)}</p>
-    <div class="foot">${p.link ? `<a href="${esc(p.link)}" target="_blank" rel="noopener">Apri ${p.tipo === "instagram" ? "su Instagram" : p.tipo === "facebook" ? "su Facebook" : "il link"} →</a>` : "<span></span>"}
+    <div class="foot">${linkSicuro(p.link) ? `<a href="${esc(linkSicuro(p.link))}" target="_blank" rel="noopener">Apri ${p.tipo === "instagram" ? "su Instagram" : p.tipo === "facebook" ? "su Facebook" : "il link"} →</a>` : "<span></span>"}
     ${can("direttivo") ? `<button class="btn ghost sm" data-act="form-post" data-id="${p.id}">Modifica</button>` : ""}</div></div></article>`;
 }
 
@@ -748,6 +749,7 @@ function formPost(id) {
   $("#fP").addEventListener("submit", async ev => {
     ev.preventDefault();
     const row = {tipo: $("#pT").value, titolo: $("#pTi").value.trim(), testo: $("#pTe").value.trim(), link: $("#pL").value.trim(), immagine: fotoNuova || p.immagine || ""};
+    if (row.link && !linkSicuro(row.link)) { toast("Il link deve iniziare con https://"); return; }
     if (await safe(() => id ? api.upd("bacheca", id, row) : api.ins("bacheca", {...row, data: new Date().toISOString()}), "Pubblicato in bacheca")) closeSheet();
   });
 }
@@ -772,6 +774,7 @@ function formConfig() {
     ev.preventDefault();
     const row = {sede: $("#cS").value.trim(), motto: $("#cM").value.trim(), logo: fotoNuova || c.logo || "",
       facebook: $("#cF").value.trim(), instagram: $("#cI").value.trim(), whatsapp: $("#cW").value.trim(), telefono: $("#cT").value.trim()};
+    if (["facebook", "instagram", "whatsapp"].some(k => row[k] && !linkSicuro(row[k]))) { toast("I link dei social devono iniziare con https://"); return; }
     if (await safe(() => api.upd("impostazioni", 1, row), "Impostazioni salvate")) closeSheet();
   });
 }
@@ -1014,7 +1017,7 @@ document.addEventListener("click", async ev => {
     case "lb-dida": { const f = $("#fDida"); f.hidden = !f.hidden; if (!f.hidden) $("#dida").focus(); return; }
     case "lb-elimina": { if (!conferma("Tocca di nuovo per eliminare")) return;
       const f = S.foto.find(x => x.id === id); if (!f) return;
-      if (await safe(async () => { await api.del("foto", id); await api.togliFile(f.percorso); }, "Foto eliminata")) disegnaLB(); return; }
+      if (await safe(async () => { await api.del("foto", id); if (percorsoDi(f.percorso, f.user_id)) await api.togliFile(f.percorso); }, "Foto eliminata")) disegnaLB(); return; }
     case "temi": return openView("temi");
     case "tema": S.temaScelto = t.dataset.v; temaAnteprima = temaPer(S.temaScelto); applyTheme(); render(); return openView("temi", null, true);
     case "personalizza": return formPersonalizza();

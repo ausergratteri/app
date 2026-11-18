@@ -3,11 +3,16 @@ on:
   schedule:
     - cron: "17 6 */3 * *"
   workflow_dispatch:
+# Il lavoro legge solo config.js: nessun altro permesso sul repository
+permissions:
+  contents: read
 jobs:
   sveglia:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Chiama il database
         run: |
           URL=$(grep -oP 'url:\s*"\K[^"]+' config.js)

@@ -46,19 +46,30 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- Alla registrazione nasce il profilo. Il primissimo iscritto diventa presidente.
+-- Il telefono si ricava dall'email interna (<cifre>@soci.ausergratteri.app), che in
+-- auth.users è unica, e non dai metadata, che chi si registra sceglie liberamente.
+-- Un numero già usato da un profilo non promuove più nessuno.
+-- Il lucchetto impedisce che due registrazioni simultanee creino due presidenti.
 create or replace function public.nuovo_profilo() returns trigger
 language plpgsql security definer set search_path = public as $$
+declare
+  dominio constant text := '@soci.ausergratteri.app';  -- uguale a DOMINIO_FINTO in app.js
+  tel text := '';
 begin
+  perform pg_advisory_xact_lock(hashtext('auser.primo_presidente'));
+  if lower(coalesce(new.email, '')) like '%' || dominio then
+    tel := public.solo_cifre_tel(split_part(new.email, '@', 1));
+  end if;
   insert into public.profili (id, nome, telefono, ruolo)
   values (
     new.id,
-    coalesce(new.raw_user_meta_data->>'nome', ''),
-    coalesce(new.raw_user_meta_data->>'telefono', ''),
+    left(coalesce(new.raw_user_meta_data->>'nome', ''), 80),
+    tel,
     case
       when not exists (select 1 from public.profili where ruolo = 'presidente') then 'presidente'
-      when public.solo_cifre_tel(new.raw_user_meta_data->>'telefono') <> ''
-           and exists (select 1 from public.tesserati t
-                       where public.solo_cifre_tel(t.telefono) = public.solo_cifre_tel(new.raw_user_meta_data->>'telefono'))
+      when tel <> ''
+           and exists (select 1 from public.tesserati t where public.solo_cifre_tel(t.telefono) = tel)
+           and not exists (select 1 from public.profili p where public.solo_cifre_tel(p.telefono) = tel)
         then 'socio'
       else 'in_attesa' end
   );
@@ -72,7 +83,8 @@ create trigger al_nuovo_utente after insert on auth.users
 -- Chi può cambiare i ruoli:
 --  * il presidente può dare e togliere qualsiasi ruolo (tranne togliersi da solo);
 --  * il direttivo può solo approvare (in_attesa ↔ socio);
---  * ognuno può cambiare il proprio nome, non il proprio ruolo.
+--  * ognuno può cambiare il proprio nome, non il proprio ruolo;
+--  * il telefono, la data di iscrizione e il nome degli altri li cambia solo il presidente.
 create or replace function public.controlla_ruolo() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare liv int := public.livello();
@@ -89,6 +101,12 @@ begin
       raise exception 'Non puoi cambiare i ruoli';
     end if;
   end if;
+  if liv < 3 and (new.telefono is distinct from old.telefono or new.creato_il is distinct from old.creato_il) then
+    raise exception 'Non puoi cambiare il telefono';
+  end if;
+  if liv < 3 and old.id <> auth.uid() and new.nome is distinct from old.nome then
+    raise exception 'Non puoi cambiare il nome di un''altra persona';
+  end if;
   new.id := old.id;
   return new;
 end $$;
@@ -103,7 +121,8 @@ create policy profili_leggi on public.profili for select
   using (id = auth.uid() or public.livello() >= 2);
 drop policy if exists profili_modifica on public.profili;
 create policy profili_modifica on public.profili for update
-  using (id = auth.uid() or public.livello() >= 2);
+  using (id = auth.uid() or public.livello() >= 2)
+  with check (id = auth.uid() or public.livello() >= 2);
 drop policy if exists profili_elimina on public.profili;
 create policy profili_elimina on public.profili for delete
   using (public.livello() >= 2 and id <> auth.uid() and ruolo in ('in_attesa','socio'));
@@ -175,6 +194,23 @@ create unique index if not exists una_adesione_a_testa
   on public.adesioni (attivita_id, user_id) where user_id is not null;
 create index if not exists adesioni_per_attivita on public.adesioni (attivita_id);
 
+-- "acc" deve essere sempre una lista di al massimo 12 persone {nome, rel}:
+-- un valore diverso faceva fallire conteggi() e bloccava l'app a tutti.
+create or replace function public.acc_valido(j jsonb) returns boolean
+language sql immutable as $$
+  select case
+    when j is null or jsonb_typeof(j) <> 'array' then false
+    when jsonb_array_length(j) > 12 then false
+    else not exists (
+      select 1 from jsonb_array_elements(j) e
+      where jsonb_typeof(e) <> 'object'
+         or jsonb_typeof(coalesce(e->'nome', '""'::jsonb)) <> 'string'
+         or jsonb_typeof(coalesce(e->'rel',  '""'::jsonb)) not in ('string','null'))
+  end;
+$$;
+alter table public.adesioni drop constraint if exists adesioni_acc_valido;
+alter table public.adesioni add constraint adesioni_acc_valido check (public.acc_valido(acc)) not valid;
+
 -- Togliendo un'attività o un'assemblea si tolgono anche le sue adesioni
 create or replace function public.pulisci_adesioni() returns trigger
 language plpgsql security definer set search_path = public as $$
@@ -208,12 +244,58 @@ drop policy if exists adesioni_elimina on public.adesioni;
 create policy adesioni_elimina on public.adesioni for delete
   using (user_id = auth.uid() or public.livello() >= 2);
 
+-- Le regole dell'app valgono anche sul database. Il socio (non il direttivo) può
+-- iscriversi o modificare solo se l'attività esiste ed è aperta, entro la scadenza,
+-- con posti liberi (solo per le nuove iscrizioni, come nell'app) e senza ospiti dove
+-- non sono ammessi. Non può spostare l'iscrizione su un'altra attività o persona.
+create or replace function public.controlla_adesione() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  liv int := public.livello();
+  att public.attivita;
+  ass public.assemblee;
+  n_acc int := case when jsonb_typeof(new.acc) = 'array' then jsonb_array_length(new.acc) else 0 end;
+  occupati int;
+begin
+  if auth.uid() is null or liv >= 2 then return new; end if;
+  if tg_op = 'UPDATE' and (new.attivita_id is distinct from old.attivita_id or new.user_id is distinct from old.user_id) then
+    raise exception 'Non puoi spostare l''iscrizione';
+  end if;
+  select * into att from public.attivita where id = new.attivita_id;
+  if found then
+    if att.stato <> 'aperta' or (att.scadenza is not null and att.scadenza < (now() at time zone 'Europe/Rome')::date) then
+      raise exception 'Non puoi iscriverti: le iscrizioni sono chiuse';
+    end if;
+    if not att.ospiti and n_acc > 0 then
+      raise exception 'Non puoi portare ospiti a questa attività';
+    end if;
+    if tg_op = 'INSERT' and coalesce(att.posti, 0) > 0 then
+      select coalesce(sum((case when a.io then 1 else 0 end)
+                          + (case when jsonb_typeof(a.acc) = 'array' then jsonb_array_length(a.acc) else 0 end)), 0)
+        into occupati from public.adesioni a where a.attivita_id = new.attivita_id;
+      if occupati >= att.posti then raise exception 'Non puoi iscriverti: posti esauriti'; end if;
+    end if;
+    return new;
+  end if;
+  select * into ass from public.assemblee where id = new.attivita_id;
+  if found then
+    if ass.stato = 'annullata' then raise exception 'Non puoi iscriverti: l''assemblea è annullata'; end if;
+    if n_acc > 0 then raise exception 'Non puoi portare ospiti a questa attività'; end if;
+    return new;
+  end if;
+  raise exception 'Non puoi iscriverti: attività inesistente';
+end $$;
+drop trigger if exists prima_di_salvare_adesione on public.adesioni;
+create trigger prima_di_salvare_adesione before insert or update on public.adesioni
+  for each row execute function public.controlla_adesione();
+
 -- Quante persone sono iscritte a ogni attività: lo vedono tutti i soci, senza i nomi
 create or replace function public.conteggi()
 returns table (attivita_id uuid, persone int)
 language sql stable security definer set search_path = public as $$
   select a.attivita_id,
-         sum((case when a.io then 1 else 0 end) + jsonb_array_length(a.acc))::int
+         sum((case when a.io then 1 else 0 end)
+             + (case when jsonb_typeof(a.acc) = 'array' then jsonb_array_length(a.acc) else 0 end))::int
   from public.adesioni a
   where public.livello() >= 1
   group by a.attivita_id;
@@ -241,6 +323,10 @@ create policy bacheca_leggi on public.bacheca for select using (public.livello()
 drop policy if exists bacheca_scrivi on public.bacheca;
 create policy bacheca_scrivi on public.bacheca for all
   using (public.livello() >= 2) with check (public.livello() >= 2);
+-- Solo indirizzi web: niente "javascript:" o simili
+alter table public.bacheca drop constraint if exists bacheca_link_web;
+alter table public.bacheca add constraint bacheca_link_web
+  check (link = '' or link ~* '^https?://') not valid;
 
 -- ---------- Impostazioni (una sola riga) ----------
 create table if not exists public.impostazioni (
@@ -265,6 +351,11 @@ drop policy if exists impostazioni_leggi on public.impostazioni;
 create policy impostazioni_leggi on public.impostazioni for select using (true);
 drop policy if exists impostazioni_modifica on public.impostazioni;
 create policy impostazioni_modifica on public.impostazioni for update using (public.livello() = 3);
+alter table public.impostazioni drop constraint if exists impostazioni_link_web;
+alter table public.impostazioni add constraint impostazioni_link_web
+  check ((facebook = '' or facebook ~* '^https?://')
+     and (instagram = '' or instagram ~* '^https?://')
+     and (whatsapp = '' or whatsapp ~* '^https?://')) not valid;
 
 -- ---------- Foto (logo, gite, bacheca e gallerie degli eventi) ----------
 -- Ogni persona carica nella propria cartella; massimo 5 MB a foto (l'app le riduce prima).
@@ -273,8 +364,9 @@ values ('foto', 'foto', true, 5242880, array['image/jpeg','image/png','image/web
 on conflict (id) do update set public = true, file_size_limit = excluded.file_size_limit,
   allowed_mime_types = excluded.allowed_mime_types;
 drop policy if exists foto_leggi on storage.objects;
+-- L'elenco dei file lo vedono solo i soci, non chi è ancora in attesa
 create policy foto_leggi on storage.objects for select to authenticated
-  using (bucket_id = 'foto');
+  using (bucket_id = 'foto' and public.livello() >= 1);
 drop policy if exists foto_carica on storage.objects;
 create policy foto_carica on storage.objects for insert to authenticated
   with check (bucket_id = 'foto' and public.livello() >= 1
@@ -303,7 +395,29 @@ create policy foto_righe_crea on public.foto for insert
   with check (public.livello() >= 1 and user_id = auth.uid());
 drop policy if exists foto_righe_modifica on public.foto;
 create policy foto_righe_modifica on public.foto for update
-  using (user_id = auth.uid() or public.livello() >= 2);
+  using (user_id = auth.uid() or public.livello() >= 2)
+  with check (user_id = auth.uid() or public.livello() >= 2);
+
+-- "percorso" deve stare nella cartella di chi ha caricato la foto: così eliminando
+-- una foto non si può far cancellare il file di un'altra persona.
+-- Si controlla solo quando il percorso viene scritto: se cambia solo user_id
+-- (per esempio diventa vuoto perché il profilo è stato eliminato) va bene così.
+create or replace function public.controlla_foto() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if auth.uid() is null then return new; end if;
+  if coalesce(new.percorso, '') <> ''
+     and (tg_op = 'INSERT' or new.percorso is distinct from old.percorso)
+     and (new.user_id is null
+          or split_part(new.percorso, '/', 1) <> new.user_id::text
+          or new.percorso like '%..%') then
+    raise exception 'Non puoi usare questo percorso per la foto';
+  end if;
+  return new;
+end $$;
+drop trigger if exists prima_di_salvare_foto on public.foto;
+create trigger prima_di_salvare_foto before insert or update on public.foto
+  for each row execute function public.controlla_foto();
 drop policy if exists foto_righe_elimina on public.foto;
 create policy foto_righe_elimina on public.foto for delete
   using (user_id = auth.uid() or public.livello() >= 2);
@@ -315,13 +429,22 @@ create or replace function public.reimposta_pin(utente uuid, pin text) returns v
 language plpgsql security definer set search_path = public, extensions as $$
 declare liv int := public.livello(); r text;
 begin
+  if liv < 2 then raise exception 'Non puoi cambiare il PIN di questa persona'; end if;
+  if pin is null or length(pin) < 6 then raise exception 'Il PIN deve avere almeno 6 cifre'; end if;
   select ruolo into r from public.profili where id = utente;
   if r is null then raise exception 'Utente non trovato'; end if;
-  if length(pin) < 6 then raise exception 'Il PIN deve avere almeno 6 cifre'; end if;
   if not (liv = 3 or (liv = 2 and r in ('in_attesa','socio'))) then
     raise exception 'Non puoi cambiare il PIN di questa persona';
   end if;
   update auth.users set encrypted_password = extensions.crypt(pin, extensions.gen_salt('bf')) where id = utente;
+  -- Chi aveva l'app aperta con il vecchio PIN deve rientrare
+  begin
+    if to_regclass('auth.sessions') is not null then
+      execute 'delete from auth.sessions where user_id = $1' using utente;
+    end if;
+  exception when insufficient_privilege then
+    raise notice 'Sessioni non chiuse: permesso mancante su auth.sessions';
+  end;
 end $$;
 
 -- ---------- Funzione per tenere sveglio il progetto gratuito ----------
