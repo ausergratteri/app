@@ -625,4 +625,3 @@ begin
 end $$;
 revoke execute on function public.importa_tesserati(jsonb, jsonb, text, int) from public, anon;
 grant execute on function public.importa_tesserati(jsonb, jsonb, text, int) to authenticated;
-
