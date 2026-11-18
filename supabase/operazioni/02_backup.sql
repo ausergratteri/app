@@ -3,7 +3,7 @@
 --  Crea lo schema backup_20261118 (non esposto all'app: l'API vede solo "public").
 --  Si può cancellare dopo qualche settimana: drop schema backup_20261118 cascade;
 -- =====================================================================
-begin;
+begin isolation level repeatable read;
 create schema if not exists backup_20261118;
 revoke all on schema backup_20261118 from public, anon, authenticated;
 
