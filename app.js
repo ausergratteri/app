@@ -14,7 +14,7 @@ const S = {
   live: CONFIGURATA, sb: null, sessione: null, profilo: null,
   myId: null, myName: "", realRole: "lettore", viewRole: "lettore",
   att: {}, ass: {}, ades: [], cont: {}, post: {}, cfg: {}, profili: [],
-  foto: [], bvista: "avvisi", temaScelto: null,
+  foto: [], bvista: "avvisi", temaScelto: null, anno: {}, pagina: {},
   tab: "home", filtro: "tutte", loading: true, note: "", sheet: null, authTab: "entra"
 };
 const ROLES = {presidente: "Presidente", direttivo: "Direttivo", socio: "Socio", lettore: "In attesa"};
@@ -335,21 +335,54 @@ function vHome() {
 
 function vAttivita() {
   const f = S.filtro;
-  const all = attivita().filter(e => f === "tutte" || e.tipo === f);
-  const fut = futuri(all), pas = passati(all).slice(0, 6);
+  const tipo = attivita().filter(e => f === "tutte" || e.tipo === f);
+  const all = perAnnoScelto("att", tipo);
+  const fut = futuri(all), pas = passati(all);
   return `<section class="sec">
     <div class="sechead"><h2>Gite ed eventi</h2>${can("direttivo") ? '<button class="btn sm" data-act="form-evento">+ Nuova</button>' : ""}</div>
     <div class="chips" role="group" aria-label="Filtra">${[["tutte","Tutte"],["gita","Gite"],["evento","Eventi"]].map(([k,l]) => `<button class="chip" data-act="filtro" data-v="${k}" aria-pressed="${f === k}">${l}</button>`).join("")}</div>
-    ${fut.length ? fut.map(card).join("") : '<div class="empty">Nessuna attività in programma.</div>'}</section>
-  ${pas.length ? `<section class="sec"><div class="sechead"><h2>Già fatte</h2></div>${pas.map(card).join("")}</section>` : ""}`;
+    ${filtroAnno("att", tipo)}
+    ${fut.length ? fut.map(card).join("") : `<div class="empty">Nessuna attività in programma${S.anno.att && S.anno.att !== "tutti" ? " nel " + S.anno.att : ""}.</div>`}</section>
+  ${perAnno(pas, "Già fatte", "att-pas")}`;
+}
+
+/* Filtro per anno: chip "Tutti", 2026, 2025… (chiave = sezione) */
+function filtroAnno(chiave, lista) {
+  const anni = [...new Set(lista.map(e => (e.data || "").slice(0, 4)).filter(Boolean))].sort().reverse();
+  if (anni.length < 2) return "";
+  const sel = S.anno[chiave] || "tutti";
+  return `<div class="chips" role="group" aria-label="Anno">${["tutti", ...anni].map(a => `<button class="chip" data-act="anno" data-k="${chiave}" data-v="${a}" aria-pressed="${sel === a}">${a === "tutti" ? "Tutti gli anni" : a}</button>`).join("")}</div>`;
+}
+const perAnnoScelto = (chiave, lista) => { const a = S.anno[chiave] || "tutti"; return a === "tutti" ? lista : lista.filter(e => (e.data || "").startsWith(a)); };
+
+/* Paginazione: N elementi per pagina, con pulsanti Precedenti / Successive */
+function paginato(chiave, lista, perPagina, disegna) {
+  const tot = Math.max(1, Math.ceil(lista.length / perPagina));
+  const p = Math.min(Math.max(1, S.pagina[chiave] || 1), tot);
+  const html = disegna(lista.slice((p - 1) * perPagina, p * perPagina));
+  if (tot === 1) return html;
+  return html + `<nav class="pager" aria-label="Pagine">
+    <button class="btn ghost sm" data-act="pagina" data-k="${chiave}" data-v="${p - 1}" ${p === 1 ? "disabled" : ""}>‹ Precedenti</button>
+    <span class="meta">Pagina ${p} di ${tot}</span>
+    <button class="btn ghost sm" data-act="pagina" data-k="${chiave}" data-v="${p + 1}" ${p === tot ? "disabled" : ""}>Successive ›</button></nav>`;
+}
+
+/* Le attività passate, tutte, divise per anno (dal più recente) */
+function perAnno(lista, titolo, chiave) {
+  if (!lista.length) return "";
+  const gruppi = pezzo => { let h = "", anno = "";
+    pezzo.forEach(e => { const a = (e.data || "").slice(0, 4); if (a !== anno) { anno = a; h += `<h3 class="anno">${a}</h3>`; } h += card(e); }); return h; };
+  return `<section class="sec" id="sez-${chiave}"><div class="sechead"><h2>${titolo}</h2><span class="meta">${lista.length}</span></div>
+    ${paginato(chiave, lista, 8, gruppi)}</section>`;
 }
 
 function vAssemblee() {
-  const all = assemblee(), fut = futuri(all), pas = passati(all).slice(0, 5);
+  const tutte = assemblee(), all = perAnnoScelto("ass", tutte), fut = futuri(all), pas = passati(all);
   return `<section class="sec">
     <div class="sechead"><h2>Assemblee dei soci</h2>${can("presidente") ? '<button class="btn sm" data-act="form-assemblea">+ Convoca</button>' : ""}</div>
+    ${filtroAnno("ass", tutte)}
     ${fut.length ? fut.map(card).join("") : '<div class="empty">Nessuna assemblea convocata.</div>'}</section>
-  ${pas.length ? `<section class="sec"><div class="sechead"><h2>Assemblee passate</h2></div>${pas.map(card).join("")}</section>` : ""}`;
+  ${perAnno(pas, "Assemblee passate", "ass-pas")}`;
 }
 
 function postCard(p) {
@@ -369,7 +402,7 @@ function vBacheca() {
     <div class="chips" role="group" aria-label="Mostra">
       <button class="chip" data-act="bvista" data-v="avvisi" aria-pressed="${!g}">Avvisi</button>
       <button class="chip" data-act="bvista" data-v="gallerie" aria-pressed="${g}">Gallerie foto${S.foto.length ? " · " + S.foto.length : ""}</button></div>
-    ${g ? vGallerie() : posts.length ? posts.map(postCard).join("") : '<div class="empty">Nessun avviso pubblicato.</div>'}</section>`;
+    ${g ? vGallerie() : posts.length ? `<div id="sez-avv">${paginato("avv", posts, 10, l => l.map(postCard).join(""))}</div>` : '<div class="empty">Nessun avviso pubblicato.</div>'}</section>`;
 }
 
 function vGestione() {
@@ -839,8 +872,10 @@ function album(e) {
     <div class="in"><h3>${esc(e.titolo)}</h3><div class="meta">${esc(fmtLong(e.data))} · ${fs.length} foto</div></div></button>`;
 }
 function vGallerie() {
-  const evs = [...new Set(S.foto.map(f => f.attivita_id))].map(trova).filter(Boolean).sort((a, b) => (b.data || "").localeCompare(a.data || ""));
-  return evs.length ? evs.map(album).join("") : '<div class="empty">Ancora nessuna foto. Si aggiungono dalla pagina di ogni gita o evento.</div>';
+  const tutti = [...new Set(S.foto.map(f => f.attivita_id))].map(trova).filter(Boolean).sort((a, b) => (b.data || "").localeCompare(a.data || ""));
+  if (!tutti.length) return '<div class="empty">Ancora nessuna foto. Si aggiungono dalla pagina di ogni gita o evento.</div>';
+  const evs = perAnnoScelto("gal", tutti);
+  return filtroAnno("gal", tutti) + `<div id="sez-gal">${paginato("gal", evs, 6, l => l.map(album).join(""))}</div>`;
 }
 function ultimeFoto() {
   const ult = [...S.foto].sort((a, b) => (b.creato_il || "").localeCompare(a.creato_il || "")).slice(0, 6);
@@ -937,7 +972,10 @@ document.addEventListener("click", async ev => {
     case "scrim": if (ev.target === t) closeSheet(); return;
     case "close": return closeSheet();
     case "tab": S.tab = t.dataset.v; render(); window.scrollTo(0, 0); return;
-    case "filtro": S.filtro = t.dataset.v; render(); return;
+    case "filtro": S.filtro = t.dataset.v; S.pagina["att-pas"] = 1; render(); return;
+    case "anno": S.anno[t.dataset.k] = t.dataset.v; Object.keys(S.pagina).forEach(k => { if (k.startsWith(t.dataset.k)) S.pagina[k] = 1; }); render(); return;
+    case "pagina": { const k = t.dataset.k; S.pagina[k] = Number(t.dataset.v); render();
+      const sez = document.getElementById("sez-" + k); if (sez) sez.scrollIntoView({block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"}); return; }
     case "authtab": S.authTab = t.dataset.v; render(); return;
     case "open": return openView(t.dataset.k, id);
     case "big": { const liv = (zoomOra() + 1) % 3; impostaZoom(liv); try { localStorage.setItem("auser-zoom", String(liv)); } catch (e) {}
