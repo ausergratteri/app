@@ -246,8 +246,9 @@ create policy adesioni_elimina on public.adesioni for delete
 
 -- Le regole dell'app valgono anche sul database. Il socio (non il direttivo) può
 -- iscriversi o modificare solo se l'attività esiste ed è aperta, entro la scadenza,
--- con posti liberi (solo per le nuove iscrizioni, come nell'app) e senza ospiti dove
--- non sono ammessi. Non può spostare l'iscrizione su un'altra attività o persona.
+-- con posti liberi per TUTTE le persone che porta (anche quando ne aggiunge modificando)
+-- e senza ospiti dove non sono ammessi. Non può spostare l'iscrizione su un'altra
+-- attività o persona. Le iscrizioni simultanee alla stessa attività passano una alla volta.
 create or replace function public.controlla_adesione() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare
@@ -255,7 +256,9 @@ declare
   att public.attivita;
   ass public.assemblee;
   n_acc int := case when jsonb_typeof(new.acc) = 'array' then jsonb_array_length(new.acc) else 0 end;
-  occupati int;
+  nuove int;      -- persone di questa iscrizione (lui/lei + familiari e amici)
+  vecchie int := 0;
+  occupati int;   -- persone delle ALTRE iscrizioni alla stessa attività
 begin
   if auth.uid() is null or liv >= 2 then return new; end if;
   if tg_op = 'UPDATE' and (new.attivita_id is distinct from old.attivita_id or new.user_id is distinct from old.user_id) then
@@ -269,11 +272,26 @@ begin
     if not att.ospiti and n_acc > 0 then
       raise exception 'Non puoi portare ospiti a questa attività';
     end if;
-    if tg_op = 'INSERT' and coalesce(att.posti, 0) > 0 then
-      select coalesce(sum((case when a.io then 1 else 0 end)
-                          + (case when jsonb_typeof(a.acc) = 'array' then jsonb_array_length(a.acc) else 0 end)), 0)
-        into occupati from public.adesioni a where a.attivita_id = new.attivita_id;
-      if occupati >= att.posti then raise exception 'Non puoi iscriverti: posti esauriti'; end if;
+    if coalesce(att.posti, 0) > 0 then
+      nuove := (case when new.io then 1 else 0 end) + n_acc;
+      if tg_op = 'UPDATE' then
+        vecchie := (case when old.io then 1 else 0 end)
+                 + (case when jsonb_typeof(old.acc) = 'array' then jsonb_array_length(old.acc) else 0 end);
+      end if;
+      -- Si controlla quando si aggiungono persone: una nuova iscrizione o una modifica
+      -- che porta più persone. Togliere persone è sempre permesso.
+      if tg_op = 'INSERT' or nuove > vecchie then
+        -- Iscrizioni simultanee alla stessa attività passano una alla volta: la seconda
+        -- aspetta che la prima finisca e poi conta anche le sue persone.
+        perform pg_advisory_xact_lock(hashtext('auser.posti'), hashtext(new.attivita_id::text));
+        select coalesce(sum((case when a.io then 1 else 0 end)
+                            + (case when jsonb_typeof(a.acc) = 'array' then jsonb_array_length(a.acc) else 0 end)), 0)
+          into occupati from public.adesioni a
+         where a.attivita_id = new.attivita_id and (tg_op = 'INSERT' or a.id <> old.id);
+        if occupati + nuove > att.posti then
+          raise exception 'Non puoi iscriverti: posti esauriti, restano % posti', greatest(att.posti - occupati, 0);
+        end if;
+      end if;
     end if;
     return new;
   end if;
@@ -375,6 +393,23 @@ drop policy if exists foto_elimina on storage.objects;
 create policy foto_elimina on storage.objects for delete to authenticated
   using (bucket_id = 'foto' and (public.livello() >= 2 or (storage.foldername(name))[1] = auth.uid()::text));
 
+-- Bucket privato per le gallerie dei soci: si legge solo con URL temporanei firmati,
+-- che può ottenere solo chi è socio. Niente SVG; nessuna regola di sovrascrittura.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('foto-private', 'foto-private', false, 5242880, array['image/jpeg','image/png','image/webp','image/gif'])
+on conflict (id) do update set public = false, file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+drop policy if exists foto_private_leggi on storage.objects;
+create policy foto_private_leggi on storage.objects for select to authenticated
+  using (bucket_id = 'foto-private' and public.livello() >= 1);
+drop policy if exists foto_private_carica on storage.objects;
+create policy foto_private_carica on storage.objects for insert to authenticated
+  with check (bucket_id = 'foto-private' and public.livello() >= 1
+              and (storage.foldername(name))[1] = auth.uid()::text);
+drop policy if exists foto_private_elimina on storage.objects;
+create policy foto_private_elimina on storage.objects for delete to authenticated
+  using (bucket_id = 'foto-private' and (public.livello() >= 2 or (storage.foldername(name))[1] = auth.uid()::text));
+
 -- Le foto delle gallerie: le pubblicano i soci, il direttivo può toglierle
 create table if not exists public.foto (
   id           uuid primary key default gen_random_uuid(),
@@ -384,8 +419,16 @@ create table if not exists public.foto (
   url          text not null,
   percorso     text not null default '',
   didascalia   text not null default '',
-  creato_il    timestamptz not null default now()
+  creato_il    timestamptz not null default now(),
+  bucket       text not null default 'foto'   -- 'foto' (pubblico) o 'foto-private'
 );
+alter table public.foto add column if not exists bucket text not null default 'foto';
+alter table public.foto drop constraint if exists foto_bucket_valido;
+alter table public.foto add constraint foto_bucket_valido check (bucket in ('foto', 'foto-private'));
+-- Una foto privata non ha URL pubblico e ha sempre un percorso
+alter table public.foto drop constraint if exists foto_privata_senza_url;
+alter table public.foto add constraint foto_privata_senza_url
+  check (bucket <> 'foto-private' or (url = '' and percorso <> ''));
 create index if not exists foto_per_attivita on public.foto (attivita_id, creato_il);
 alter table public.foto enable row level security;
 drop policy if exists foto_righe_leggi on public.foto;
@@ -406,6 +449,9 @@ create or replace function public.controlla_foto() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   if auth.uid() is null then return new; end if;
+  if tg_op = 'UPDATE' and new.bucket is distinct from old.bucket then
+    raise exception 'Non puoi spostare la foto in un altro archivio';
+  end if;
   if coalesce(new.percorso, '') <> ''
      and (tg_op = 'INSERT' or new.percorso is distinct from old.percorso)
      and (new.user_id is null

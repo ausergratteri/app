@@ -33,7 +33,8 @@ create table storage.objects (
   id        uuid primary key default gen_random_uuid(),
   bucket_id text not null,
   name      text not null,
-  owner     uuid default auth.uid()
+  owner     uuid default auth.uid(),
+  metadata  jsonb   -- come in Supabase: {"size": ..., "eTag": "...", "mimetype": ...}
 );
 alter table storage.objects enable row level security;
 create function storage.foldername(name text) returns text[] language sql immutable as $$

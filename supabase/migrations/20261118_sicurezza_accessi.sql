@@ -113,8 +113,9 @@ $$;
 
 -- ---------- 4. Adesioni: le regole dell'app valgono anche sul database ----------
 -- Il socio (non il direttivo) può iscriversi o modificare solo se l'attività esiste
--- ed è aperta, entro la scadenza, con posti liberi (solo per le nuove iscrizioni,
--- come nell'app) e senza ospiti dove non sono ammessi. Non può spostare l'iscrizione.
+-- ed è aperta, entro la scadenza, con posti liberi per TUTTE le persone che porta
+-- (anche quando ne aggiunge modificando) e senza ospiti dove non sono ammessi.
+-- Non può spostare l'iscrizione. Le iscrizioni simultanee passano una alla volta.
 create or replace function public.controlla_adesione() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare
@@ -122,7 +123,9 @@ declare
   att public.attivita;
   ass public.assemblee;
   n_acc int := case when jsonb_typeof(new.acc) = 'array' then jsonb_array_length(new.acc) else 0 end;
-  occupati int;
+  nuove int;      -- persone di questa iscrizione (lui/lei + familiari e amici)
+  vecchie int := 0;
+  occupati int;   -- persone delle ALTRE iscrizioni alla stessa attività
 begin
   if auth.uid() is null or liv >= 2 then return new; end if;
   if tg_op = 'UPDATE' and (new.attivita_id is distinct from old.attivita_id or new.user_id is distinct from old.user_id) then
@@ -136,11 +139,26 @@ begin
     if not att.ospiti and n_acc > 0 then
       raise exception 'Non puoi portare ospiti a questa attività';
     end if;
-    if tg_op = 'INSERT' and coalesce(att.posti, 0) > 0 then
-      select coalesce(sum((case when a.io then 1 else 0 end)
-                          + (case when jsonb_typeof(a.acc) = 'array' then jsonb_array_length(a.acc) else 0 end)), 0)
-        into occupati from public.adesioni a where a.attivita_id = new.attivita_id;
-      if occupati >= att.posti then raise exception 'Non puoi iscriverti: posti esauriti'; end if;
+    if coalesce(att.posti, 0) > 0 then
+      nuove := (case when new.io then 1 else 0 end) + n_acc;
+      if tg_op = 'UPDATE' then
+        vecchie := (case when old.io then 1 else 0 end)
+                 + (case when jsonb_typeof(old.acc) = 'array' then jsonb_array_length(old.acc) else 0 end);
+      end if;
+      -- Si controlla quando si aggiungono persone: una nuova iscrizione o una modifica
+      -- che porta più persone. Togliere persone è sempre permesso.
+      if tg_op = 'INSERT' or nuove > vecchie then
+        -- Iscrizioni simultanee alla stessa attività passano una alla volta: la seconda
+        -- aspetta che la prima finisca e poi conta anche le sue persone.
+        perform pg_advisory_xact_lock(hashtext('auser.posti'), hashtext(new.attivita_id::text));
+        select coalesce(sum((case when a.io then 1 else 0 end)
+                            + (case when jsonb_typeof(a.acc) = 'array' then jsonb_array_length(a.acc) else 0 end)), 0)
+          into occupati from public.adesioni a
+         where a.attivita_id = new.attivita_id and (tg_op = 'INSERT' or a.id <> old.id);
+        if occupati + nuove > att.posti then
+          raise exception 'Non puoi iscriverti: posti esauriti, restano % posti', greatest(att.posti - occupati, 0);
+        end if;
+      end if;
     end if;
     return new;
   end if;

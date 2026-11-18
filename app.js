@@ -18,6 +18,11 @@ if (typeof window.urlCss !== "function") window.urlCss = u => encodeURI(String(u
 if (typeof window.percorsoDi !== "function") window.percorsoDi = () => false;
 if (typeof window.accSicuri !== "function") window.accSicuri = acc => Array.isArray(acc) ? acc.filter(a => a && typeof a === "object") : [];
 if (typeof window.messaggioErrore !== "function") window.messaggioErrore = () => "";
+// Senza sicurezza.js le foto delle gallerie non si mostrano (mai con l'URL pubblico)
+if (typeof window.firmaGallerie !== "function") window.firmaGallerie = async () => { throw new Error("Supporto foto private non caricato"); };
+// Bucket "foto": pubblico (copertine, bacheca, logo). "foto-private": gallerie dei soci.
+const BKT_PUB = window.BUCKET_PUBBLICO || "foto", BKT_GAL = window.BUCKET_GALLERIE || "foto-private";
+const bucketFoto = f => (f && f.bucket) || BKT_PUB;
 
 const S = {
   live: CONFIGURATA, sb: null, sessione: null, profilo: null,
@@ -95,18 +100,22 @@ const api = {
     }
     return {inseriti, aggiornati, saltati};
   },
-  // Carica un'immagine nella cartella di chi la carica; le foto vengono ridotte a 1600 px
-  async carica(file, riduci = true) {
+  // Carica un'immagine nella cartella di chi la carica; le foto vengono ridotte a 1600 px.
+  // Nel bucket pubblico restituisce l'URL pubblico; in quello delle gallerie nessun URL
+  // (si leggono solo con URL temporanei firmati).
+  async carica(file, riduci = true, bucket = BKT_PUB) {
     const blob = riduci ? await comprimi(file) : file;
-    if (!S.live) return {url: URL.createObjectURL(blob), percorso: ""};
+    if (!S.live) return {url: URL.createObjectURL(blob), percorso: "", bucket};
+    if (!S.myId) throw new Error("Sessione scaduta: rientra nell'app");
     const ext = blob.type === "image/jpeg" ? "jpg" : ((file.name.split(".").pop() || "img").toLowerCase().replace(/[^a-z0-9]/g, "") || "img");
     const percorso = `${S.myId}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}.${ext}`;
-    const {error} = await S.sb.storage.from("foto").upload(percorso, blob, {upsert: false, contentType: blob.type || file.type});
+    const {error} = await S.sb.storage.from(bucket).upload(percorso, blob, {upsert: false, contentType: blob.type || file.type});
     if (error) throw error;
-    return {url: S.sb.storage.from("foto").getPublicUrl(percorso).data.publicUrl, percorso};
+    const url = bucket === BKT_PUB ? S.sb.storage.from(bucket).getPublicUrl(percorso).data.publicUrl : "";
+    return {url, percorso, bucket};
   },
-  async foto(file, riduci = true) { return (await api.carica(file, riduci)).url; },
-  async togliFile(percorso) { if (S.live && percorso) { try { await S.sb.storage.from("foto").remove([percorso]); } catch (e) {} } }
+  async foto(file, riduci = true) { return (await api.carica(file, riduci, BKT_PUB)).url; },
+  async togliFile(percorso, bucket = BKT_PUB) { if (S.live && percorso) { try { await S.sb.storage.from(bucket).remove([percorso]); } catch (e) {} } }
 };
 
 async function comprimi(file, max = 1600, q = 0.82) {
@@ -135,23 +144,61 @@ async function safe(fn, ok) {
   }
 }
 
+// Durata degli URL temporanei delle foto e momento del rinnovo (prima della scadenza)
+const DURATA_URL_FOTO = 3600, RINNOVO_FOTO_MS = 45 * 60 * 1000, SCADENZA_SICURA_MS = 55 * 60 * 1000;
+
 async function carica() {
+  const versione = (S._versioneCarica || 0) + 1;
+  S._versioneCarica = versione;
+  const utente = S.sessione?.user?.id;
+  const ancoraValida = () => !S.live || (
+    !!utente &&
+    S._versioneCarica === versione &&
+    S.sessione?.user?.id === utente
+  );
   let att, ass, ades, post, imp, prof = [];
   if (S.live) {
     const q = t => S.sb.from(t).select("*");
     const r = await Promise.all([q("attivita"), q("assemblee"), q("adesioni"), q("bacheca"), q("impostazioni").eq("id", 1).maybeSingle(),
       S.sb.rpc("conteggi"), RANK[S.realRole] >= 2 ? q("profili").order("nome") : Promise.resolve({data: []}), q("foto").order("creato_il"),
       RANK[S.realRole] >= 2 ? q("tesserati").order("nome") : Promise.resolve({data: []})]);
+    if (!ancoraValida()) return;
     const err = r.find(x => x.error); if (err) throw err.error;
     [att, ass, ades, post, imp] = r.map(x => x.data);
     ades = (ades || []).map(a => ({...a, acc: accSicuri(a.acc)}));
     S.cont = {}; (r[5].data || []).forEach(c => S.cont[c.attivita_id] = c.persone);
-    prof = r[6].data || []; S.foto = r[7].data || []; S.tesserati = r[8].data || [];
+    prof = r[6].data || []; S.tesserati = r[8].data || [];
+    // Le foto delle gallerie si mostrano solo con URL temporanei firmati.
+    // Gli URL ancora freschi (meno di 45 minuti) si riusano: così le immagini
+    // restano nella cache del telefono e non si riscaricano a ogni salvataggio.
+    const righeFoto = r[7].data || [];
+    const fresche = S._fotoFirmateAlle && Date.now() - S._fotoFirmateAlle < RINNOVO_FOTO_MS;
+    const gia = fresche ? new Map((S.foto || []).map(f => [bucketFoto(f) + "/" + f.percorso, f.url])) : null;
+    try {
+      if (typeof firmaGallerie !== "function") throw new Error("Supporto foto private non caricato");
+      const firmate = await firmaGallerie(righeFoto, S.sb.storage, {durata: DURATA_URL_FOTO, giaFirmate: gia});
+      if (!ancoraValida()) return;
+      const riusate = !!gia && righeFoto.some(f => gia.has(bucketFoto(f) + "/" + f.percorso));
+      S._fotoDaFirmare = righeFoto;
+      S.foto = firmate.foto;
+      S.fotoScartate = firmate.scartate;
+      if (!riusate) S._fotoFirmateAlle = Date.now();  // con URL riusati vale la firma più vecchia
+      S.fotoErrore = false;
+      if (firmate.scartate) console.warn(`Foto non disponibili: ${firmate.scartate}`);
+    } catch (e) {
+      if (!ancoraValida()) return;
+      console.error("Fotografie temporaneamente non disponibili", e);
+      S._fotoDaFirmare = righeFoto;
+      S.foto = [];
+      S._fotoFirmateAlle = 0;
+      S.fotoErrore = true;
+    }
   } else {
     att = D.attivita; ass = D.assemblee; ades = D.adesioni; post = D.bacheca; imp = D.impostazioni[0]; prof = D.profili; S.foto = [...D.foto]; S.tesserati = [...(D.tesserati || [])];
     S.cont = {};
     ades.forEach(a => S.cont[a.attivita_id] = (S.cont[a.attivita_id] || 0) + (a.io ? 1 : 0) + (a.acc || []).length);
   }
+  if (!ancoraValida()) return;
   S.att = {}; (att || []).forEach(r => S.att[r.id] = r);
   S.ass = {}; (ass || []).forEach(r => S.ass[r.id] = r);
   S.ades = ades || [];
@@ -974,6 +1021,8 @@ function formPersonalizza() {
 }
 
 /* ---------- Gallerie ---------- */
+// Se le foto non si possono mostrare (Storage non raggiungibile) lo si dice, invece di "nessuna foto"
+const avvisoFoto = () => S.fotoErrore ? '<p class="meta" role="status" style="margin:0">Le foto non sono visibili in questo momento. Riprova tra poco.</p>' : "";
 const fotoDi = eid => S.foto.filter(f => f.attivita_id === eid).sort((a, b) => (a.creato_il || "").localeCompare(b.creato_il || ""));
 function thumb(f, eid, i) {
   return `<button class="thumb" data-act="foto" data-id="${eid}" data-i="${i}" aria-label="Apri foto ${i + 1}${f.didascalia ? ": " + esc(f.didascalia) : ""}"><img src="${esc(f.url)}" alt="" loading="lazy"></button>`;
@@ -989,13 +1038,14 @@ function boxFoto(e) {
   const passato = (e.data || "") <= todayISO();
   return `<div class="box"><div class="sechead"><h3>Foto${fs.length ? " · " + fs.length : ""}</h3>${fs.length > 9 ? `<button class="link" data-act="galleria" data-id="${e.id}">Vedi tutte</button>` : ""}</div>
     ${fs.length ? `<div class="grid3">${fs.slice(0, 9).map((f, i) => thumb(f, e.id, i)).join("")}</div>`
+      : S.fotoErrore ? avvisoFoto()
       : `<p class="meta" style="margin:0">${passato ? "Ancora nessuna foto. Eri presente? Condividi le tue!" : "Dopo l'evento qui trovi le foto dei partecipanti."}</p>`}
     ${bottoneCarica(e.id)}</div>`;
 }
 function vGalleria(e) {
   const fs = fotoDi(e.id);
   return `<div class="meta">${esc(fmtLongY(e.data))} · ${fs.length} foto</div>
-    ${fs.length ? `<div class="grid3">${fs.map((f, i) => thumb(f, e.id, i)).join("")}</div>` : '<div class="empty">Ancora nessuna foto.</div>'}
+    ${fs.length ? `<div class="grid3">${fs.map((f, i) => thumb(f, e.id, i)).join("")}</div>` : S.fotoErrore ? avvisoFoto() : '<div class="empty">Ancora nessuna foto.</div>'}
     ${bottoneCarica(e.id)}
     <button class="btn ghost block" data-act="open" data-k="${e.tipo === "assemblea" ? "assemblea" : "evento"}" data-id="${e.id}">Vai alla pagina dell'evento</button>`;
 }
@@ -1006,7 +1056,7 @@ function album(e) {
 }
 function vGallerie() {
   const tutti = [...new Set(S.foto.map(f => f.attivita_id))].map(trova).filter(Boolean).sort((a, b) => (b.data || "").localeCompare(a.data || ""));
-  if (!tutti.length) return '<div class="empty">Ancora nessuna foto. Si aggiungono dalla pagina di ogni gita o evento.</div>';
+  if (!tutti.length) return S.fotoErrore ? avvisoFoto() : '<div class="empty">Ancora nessuna foto. Si aggiungono dalla pagina di ogni gita o evento.</div>';
   const evs = perAnnoScelto("gal", tutti);
   return filtroAnno("gal", tutti) + `<div id="sez-gal">${paginato("gal", evs, 6, l => l.map(album).join(""))}</div>`;
 }
@@ -1020,14 +1070,23 @@ async function caricaFoto(eid, files) {
   const max = can("direttivo") ? 100 : 20;
   const lista = [...files].slice(0, max), out = () => $("#up-" + eid);
   let ok = 0;
+  const utente = S.myId;
   for (let i = 0; i < lista.length; i++) {
+    if (S.myId !== utente) break;  // uscito o cambiato utente: non si carica a nome di altri
     if (out()) out().textContent = `Carico la foto ${i + 1} di ${lista.length}…`;
+    let r = null;
     try {
-      const r = await api.carica(lista[i]);
-      await api.ins("foto", {attivita_id: eid, user_id: S.myId, autore: S.myName, url: r.url, percorso: r.percorso, didascalia: ""});
+      // Le foto delle gallerie vanno nel bucket privato, senza URL pubblico
+      r = await api.carica(lista[i], true, BKT_GAL);
+      await api.ins("foto", {attivita_id: eid, user_id: utente, autore: S.myName, url: S.live ? "" : r.url, percorso: r.percorso, bucket: r.bucket, didascalia: ""});
       ok++;
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      console.error(e);
+      // Il file è stato caricato ma la riga no: si toglie, così non resta un file orfano
+      if (r && r.percorso) await api.togliFile(r.percorso, r.bucket);
+    }
   }
+  if (S.myId !== utente) return;
   try { await carica(); } catch (e) {}
   if (files.length > max) toast(`Puoi caricare fino a ${max} foto per volta: ne ho caricate ${ok}.`);
   else toast(ok === lista.length ? (ok === 1 ? "Foto pubblicata. Grazie!" : ok + " foto pubblicate. Grazie!") : `Pubblicate ${ok} foto su ${lista.length}: le altre non sono riuscite.`);
@@ -1160,7 +1219,7 @@ document.addEventListener("click", async ev => {
     case "lb-dida": { const f = $("#fDida"); f.hidden = !f.hidden; if (!f.hidden) $("#dida").focus(); return; }
     case "lb-elimina": { if (!conferma("Tocca di nuovo per eliminare")) return;
       const f = S.foto.find(x => x.id === id); if (!f) return;
-      if (await safe(async () => { await api.del("foto", id); if (percorsoDi(f.percorso, f.user_id)) await api.togliFile(f.percorso); }, "Foto eliminata")) disegnaLB(); return; }
+      if (await safe(async () => { await api.del("foto", id); if (percorsoDi(f.percorso, f.user_id)) await api.togliFile(f.percorso, bucketFoto(f)); }, "Foto eliminata")) disegnaLB(); return; }
     case "temi": return openView("temi");
     case "tema": S.temaScelto = t.dataset.v; temaAnteprima = temaPer(S.temaScelto); applyTheme(); render(); return openView("temi", null, true);
     case "personalizza": return formPersonalizza();
@@ -1197,13 +1256,75 @@ document.addEventListener("change", ev => {
 });
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.live && RANK[S.realRole] >= 1) carica().catch(() => {}); });
 
+
+// Rinnova soltanto gli URL delle foto, senza ricaricare tutto il database.
+// Parte dopo 45 minuti (gli URL valgono 60) o subito se l'ultima firma è fallita.
+async function rinnovaFoto() {
+  if (!S.live || !S.sessione?.user || RANK[S.realRole] < 1) return;
+  if (S._rinnovoFotoInCorso || !S._fotoDaFirmare?.length) return;
+  if (S._fotoFirmateAlle && Date.now() - S._fotoFirmateAlle < RINNOVO_FOTO_MS) return;
+
+  const utente = S.sessione.user.id;
+  const versione = S._versioneCarica;
+  const origine = S._fotoDaFirmare;
+  const valida = () =>
+    S.sessione?.user?.id === utente &&
+    S._versioneCarica === versione &&
+    S._fotoDaFirmare === origine;
+
+  S._rinnovoFotoInCorso = true;
+  try {
+    const {foto, scartate} = await firmaGallerie(origine, S.sb.storage, {durata: DURATA_URL_FOTO});
+    if (!valida()) return;
+    S.foto = foto;
+    S.fotoScartate = scartate;
+    S._fotoFirmateAlle = Date.now();
+    S.fotoErrore = false;
+    refresh();
+    if (LB) disegnaLB();
+  } catch (e) {
+    if (!valida()) return;
+    console.error("Rinnovo fotografie non riuscito", e);
+    // Si riprova al prossimo controllo; gli URL vicini alla scadenza non si mostrano più.
+    const scaduti = !S._fotoFirmateAlle || Date.now() - S._fotoFirmateAlle >= SCADENZA_SICURA_MS;
+    if (scaduti && (S.foto.length || !S.fotoErrore)) {   // ridisegna solo se cambia qualcosa
+      S.foto = [];
+      S._fotoFirmateAlle = 0;
+      S.fotoErrore = true;
+      refresh();
+      if (LB) chiudiLB();
+    }
+  } finally {
+    S._rinnovoFotoInCorso = false;
+  }
+}
+
+// Controllo leggero ogni minuto; senza sessione non esegue richieste.
+setInterval(() => { rinnovaFoto().catch(console.error); }, 60 * 1000);
+
 /* =====================================================================
    Avvio
    ===================================================================== */
+// Toglie dalla memoria tutto ciò che appartiene alla persona che è uscita.
+// Le richieste ancora in corso vengono scartate grazie a _versioneCarica.
+function azzeraDatiSessione() {
+  S._versioneCarica = (S._versioneCarica || 0) + 1;
+  S.realRole = S.viewRole = "lettore";
+  S.myId = null; S.myName = ""; S.profilo = null;
+  S.foto = []; S.fotoErrore = false; S.fotoScartate = 0;
+  S._fotoDaFirmare = []; S._fotoFirmateAlle = 0;
+  S.att = {}; S.ass = {}; S.ades = [];
+  S.post = {}; S.profili = []; S.tesserati = []; S.cont = {};
+  S.tab = "home";
+  IMP = null; fotoNuova = null;  // anteprima dell'importazione (dati dei tesserati) e foto in attesa
+}
+
 async function caricaProfilo() {
   const u = S.sessione?.user; if (!u) return;
   S.myId = u.id;
   const {data, error} = await S.sb.from("profili").select("*").eq("id", u.id).maybeSingle();
+  // Uscito o cambiato utente mentre si leggeva il profilo: risposta da scartare
+  if (S.sessione?.user?.id !== u.id || S.myId !== u.id) return;
   if (error) {
     S.loading = false; S.realRole = S.viewRole = "lettore";
     $("#tabs").innerHTML = "";
@@ -1235,8 +1356,12 @@ async function start() {
   S.sb.auth.onAuthStateChange((evento, sessione) => {
     const prima = S.sessione?.user?.id;
     S.sessione = sessione;
-    if (!sessione) { S.realRole = S.viewRole = "lettore"; S.myId = null; S.tab = "home"; closeSheet(); render(); }
-    else if (sessione.user.id !== prima) setTimeout(caricaProfilo, 0);
+    if (!sessione) { azzeraDatiSessione(); closeSheet(); chiudiLB(); render(); }
+    else if (sessione.user.id !== prima) {
+      // Un altro utente (per esempio entrato da un'altra scheda): niente dati del precedente
+      if (prima) { azzeraDatiSessione(); closeSheet(); chiudiLB(); S.loading = true; render(); }
+      setTimeout(caricaProfilo, 0);
+    }
   });
 }
 
