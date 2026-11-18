@@ -45,7 +45,11 @@ function creaClient({url, chiave, fetch: f = globalThis.fetch}) {
     throw new Error("Serve la chiave secret (service role), non quella pubblica dell'app");
   }
   const base = url.replace(/\/+$/, "");
-  const h = extra => ({apikey: chiave, Authorization: "Bearer " + chiave, ...extra});
+  const h = extra => ({
+    apikey: chiave,
+    ...(!chiave.startsWith("sb_secret_") ? {Authorization: "Bearer " + chiave} : {}),
+    ...extra
+  });
   const enc = p => p.split("/").map(encodeURIComponent).join("/");
   // Messaggi d'errore senza intestazioni né chiave
   const errore = async (cosa, r) => new Error(`${cosa}: HTTP ${r.status} ${(await r.text().catch(() => "")).slice(0, 200).split(chiave).join("***")}`);

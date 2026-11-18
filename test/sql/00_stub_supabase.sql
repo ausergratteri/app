@@ -42,5 +42,5 @@ create function storage.foldername(name text) returns text[] language sql immuta
 $$;
 -- Come in Supabase: i permessi sulla tabella ci sono, decide RLS
 grant usage on schema storage to anon, authenticated;
-grant select, insert, delete on storage.objects to anon, authenticated;
+grant select, insert, update, delete on storage.objects to anon, authenticated;
 grant execute on function storage.foldername(text) to authenticated;

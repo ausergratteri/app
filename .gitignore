@@ -1,2 +1,8 @@
 # Rapporti delle scansioni di sicurezza: restano solo in locale
 strix_runs/
+
+# File di sistema di macOS
+.DS_Store
+
+# Relazione tecnica riservata
+SICUREZZA_INTERVENTI_2026.md

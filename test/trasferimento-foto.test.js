@@ -166,3 +166,22 @@ test("trasferimento: senza cartella del registro il comando non parte", async ()
   assert.equal(codice, 2);
   assert.match(log.join(" "), /--uscita/);
 });
+
+test("trasferimento: chiave sb_secret_ solo in apikey, chiave JWT anche come Bearer", async () => {
+  const intestazioni = [];
+  const fetchFinto = async (url, opz = {}) => {
+    intestazioni.push(opz.headers);
+    return {ok: true, status: 200, headers: {get: () => "application/json"},
+      async json() { return []; }, async text() { return "[]"; }};
+  };
+  // Le chiavi sb_secret_ non sono JWT: il gateway le rifiuta se arrivano come Bearer
+  await T.piano(T.creaClient({url: URL_P, chiave: CHIAVE, fetch: fetchFinto}), silenzio);
+  assert.ok(intestazioni.length > 0);
+  assert.ok(intestazioni.every(h => h.apikey === CHIAVE && !("Authorization" in h)));
+  // Vecchia chiave service_role (JWT finto, non firmato): resta anche come Bearer
+  intestazioni.length = 0;
+  const jwt = ["e30", Buffer.from('{"role":"service_role"}').toString("base64url"), "firma-finta-di-prova"].join(".");
+  await T.piano(T.creaClient({url: URL_P, chiave: jwt, fetch: fetchFinto}), silenzio);
+  assert.ok(intestazioni.length > 0);
+  assert.ok(intestazioni.every(h => h.apikey === jwt && h.Authorization === "Bearer " + jwt));
+});

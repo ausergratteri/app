@@ -1,4 +1,7 @@
-# Operazioni per le migrazioni 20261118 (sicurezza), 20261119 (importazione tesserati) e 20261120 (foto private)
+# Operazioni per le migrazioni 20261118 (sicurezza), 20261119 (importazione tesserati), 20261120 (foto private) e 20261121 (permessi sulle foto)
+
+Riepilogo completo degli interventi, dello stato della produzione e dei rischi residui:
+[`SICUREZZA_INTERVENTI_2026.md`](../../SICUREZZA_INTERVENTI_2026.md).
 
 Script da incollare nel SQL Editor di Supabase, **in questo ordine**. Non contengono
 credenziali né dati: leggono e copiano solo quello che è già nel database.
@@ -50,9 +53,23 @@ Note:
   (`drop schema backup_20261120 cascade;`) dopo F7.
 * Rollback della sicurezza (`03_rollback.sql`) dopo F1: prima `05_rollback_foto_private.sql`.
 
+## Permessi sulle foto per ruolo (20261121)
+
+Presidente e direttivo vedono e cancellano tutte le foto; il socio le vede e cancella
+solo le sue; chi è in attesa, espulso (riportato in attesa) o senza profilo non vede,
+non carica, non modifica e non cancella nulla. Non tocca file né righe: solo regole.
+
+| Passo | File | Cosa fa | Modifica? |
+|---|---|---|---|
+| P1 | `07_controlla_policy_foto.sql` | Elenca le regole su `public.foto` e `storage.objects`; quelle con `atteso = NO` sono regole concorrenti da esaminare | No, solo lettura |
+| P2 | `../migrations/20261121_permessi_foto_ruoli.sql` | Corregge le regole "le proprie foto" e aggiunge regole restrittive. Si ferma senza cambiare nulla se trova regole sconosciute | Sì (solo regole) |
+| P3 | `07_controlla_policy_foto.sql` | Di nuovo: 4 restrittive per tabella, nessuna riga `NO`, conteggi delle foto invariati | No |
+| P4 | Prove con i 3 account di prova (socio: vede, cancella solo le sue; direttivo/presidente: cancellano tutte) | App | Sì, solo foto di prova |
+| — | `08_rollback_permessi_foto.sql` | Solo in caso di problemi: regole identiche a quelle dopo 20261120 | Sì (solo regole) |
+
 ## Impronte attese delle funzioni (controllo "FOTOGRAFIA DELLA STRUTTURA")
 
-`left(md5(prosrc), 8)` dopo le tre migrazioni:
+`left(md5(prosrc), 8)` dopo le migrazioni (20261121 non cambia funzioni):
 
 | Funzione | Impronta |
 |---|---|

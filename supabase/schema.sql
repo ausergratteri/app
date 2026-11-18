@@ -391,7 +391,8 @@ create policy foto_carica on storage.objects for insert to authenticated
               and (storage.foldername(name))[1] = auth.uid()::text);
 drop policy if exists foto_elimina on storage.objects;
 create policy foto_elimina on storage.objects for delete to authenticated
-  using (bucket_id = 'foto' and (public.livello() >= 2 or (storage.foldername(name))[1] = auth.uid()::text));
+  using (bucket_id = 'foto' and (public.livello() >= 2
+         or (public.livello() >= 1 and (storage.foldername(name))[1] = auth.uid()::text)));
 
 -- Bucket privato per le gallerie dei soci: si legge solo con URL temporanei firmati,
 -- che può ottenere solo chi è socio. Niente SVG; nessuna regola di sovrascrittura.
@@ -408,7 +409,30 @@ create policy foto_private_carica on storage.objects for insert to authenticated
               and (storage.foldername(name))[1] = auth.uid()::text);
 drop policy if exists foto_private_elimina on storage.objects;
 create policy foto_private_elimina on storage.objects for delete to authenticated
-  using (bucket_id = 'foto-private' and (public.livello() >= 2 or (storage.foldername(name))[1] = auth.uid()::text));
+  using (bucket_id = 'foto-private' and (public.livello() >= 2
+         or (public.livello() >= 1 and (storage.foldername(name))[1] = auth.uid()::text)));
+
+-- Regole RESTRITTIVE sui due bucket delle foto (vedi migrations/20261121_permessi_foto_ruoli.sql):
+-- valgono in AND con tutte le altre, così una regola troppo larga aggiunta in futuro
+-- non fa entrare chi è in attesa e non lascia a un socio i file degli altri.
+drop policy if exists foto_archivi_solo_soci on storage.objects;
+create policy foto_archivi_solo_soci on storage.objects as restrictive for all to anon, authenticated
+  using (case when bucket_id in ('foto', 'foto-private') then public.livello() >= 1 else true end)
+  with check (case when bucket_id in ('foto', 'foto-private') then public.livello() >= 1 else true end);
+drop policy if exists foto_archivi_carica_propria on storage.objects;
+create policy foto_archivi_carica_propria on storage.objects as restrictive for insert to anon, authenticated
+  with check (case when bucket_id in ('foto', 'foto-private')
+                   then (storage.foldername(name))[1] = auth.uid()::text else true end);
+drop policy if exists foto_archivi_modifica_propria on storage.objects;
+create policy foto_archivi_modifica_propria on storage.objects as restrictive for update to anon, authenticated
+  using (case when bucket_id in ('foto', 'foto-private')
+              then public.livello() >= 2 or (storage.foldername(name))[1] = auth.uid()::text else true end)
+  with check (case when bucket_id in ('foto', 'foto-private')
+              then public.livello() >= 2 or (storage.foldername(name))[1] = auth.uid()::text else true end);
+drop policy if exists foto_archivi_elimina_propria on storage.objects;
+create policy foto_archivi_elimina_propria on storage.objects as restrictive for delete to anon, authenticated
+  using (case when bucket_id in ('foto', 'foto-private')
+              then public.livello() >= 2 or (storage.foldername(name))[1] = auth.uid()::text else true end);
 
 -- Le foto delle gallerie: le pubblicano i soci, il direttivo può toglierle
 create table if not exists public.foto (
@@ -438,8 +462,22 @@ create policy foto_righe_crea on public.foto for insert
   with check (public.livello() >= 1 and user_id = auth.uid());
 drop policy if exists foto_righe_modifica on public.foto;
 create policy foto_righe_modifica on public.foto for update
-  using (user_id = auth.uid() or public.livello() >= 2)
-  with check (user_id = auth.uid() or public.livello() >= 2);
+  using (public.livello() >= 2 or (public.livello() >= 1 and user_id = auth.uid()))
+  with check (public.livello() >= 2 or (public.livello() >= 1 and user_id = auth.uid()));
+-- Regole RESTRITTIVE (in AND con tutte le altre): solo i soci, e un socio solo sulle sue foto
+drop policy if exists foto_righe_solo_soci on public.foto;
+create policy foto_righe_solo_soci on public.foto as restrictive for all to anon, authenticated
+  using (public.livello() >= 1) with check (public.livello() >= 1);
+drop policy if exists foto_righe_crea_proprie on public.foto;
+create policy foto_righe_crea_proprie on public.foto as restrictive for insert to anon, authenticated
+  with check (user_id = auth.uid());
+drop policy if exists foto_righe_modifica_proprie on public.foto;
+create policy foto_righe_modifica_proprie on public.foto as restrictive for update to anon, authenticated
+  using (public.livello() >= 2 or user_id = auth.uid())
+  with check (public.livello() >= 2 or user_id = auth.uid());
+drop policy if exists foto_righe_elimina_proprie on public.foto;
+create policy foto_righe_elimina_proprie on public.foto as restrictive for delete to anon, authenticated
+  using (public.livello() >= 2 or user_id = auth.uid());
 
 -- "percorso" deve stare nella cartella di chi ha caricato la foto: così eliminando
 -- una foto non si può far cancellare il file di un'altra persona.
@@ -466,7 +504,7 @@ create trigger prima_di_salvare_foto before insert or update on public.foto
   for each row execute function public.controlla_foto();
 drop policy if exists foto_righe_elimina on public.foto;
 create policy foto_righe_elimina on public.foto for delete
-  using (user_id = auth.uid() or public.livello() >= 2);
+  using (public.livello() >= 2 or (public.livello() >= 1 and user_id = auth.uid()));
 
 -- ---------- Nuovo PIN per chi l'ha dimenticato ----------
 -- Il presidente lo può fare per tutti, il direttivo solo per i soci.
