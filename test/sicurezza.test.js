@@ -3,7 +3,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const {linkSicuro, urlCss, percorsoDi, accSicuri} = require("../sicurezza.js");
+const vm = require("node:vm");
+const {linkSicuro, urlCss, percorsoDi, accSicuri, messaggioErrore} = require("../sicurezza.js");
 
 const radice = path.join(__dirname, "..");
 
@@ -44,8 +45,44 @@ test("accSicuri: dati rovinati non bloccano l'app", () => {
   assert.deepEqual(accSicuri({}), []);
   assert.deepEqual(accSicuri("x"), []);
   assert.deepEqual(accSicuri(null), []);
-  assert.deepEqual(accSicuri([1, "a", null, [], {nome: 5, rel: 7}]), [{nome: "", rel: ""}]);
+  assert.deepEqual(accSicuri([1, null, [], {nome: 5, rel: 7}]), [{nome: "", rel: ""}]);
   assert.deepEqual(accSicuri([{nome: "Rosa", rel: "Familiare"}]), [{nome: "Rosa", rel: "Familiare"}]);
+});
+
+test("accSicuri: i nomi salvati come testo non si perdono", () => {
+  assert.deepEqual(accSicuri(["Rosa", "Pino"]), [{nome: "Rosa", rel: ""}, {nome: "Pino", rel: ""}]);
+});
+
+test("messaggioErrore: le regole del database danno messaggi chiari", () => {
+  assert.match(messaggioErrore("Non puoi iscriverti: posti esauriti"), /Posti esauriti/);
+  assert.match(messaggioErrore("Non puoi iscriverti: le iscrizioni sono chiuse"), /chiuse/);
+  assert.match(messaggioErrore("Non puoi iscriverti: l'assemblea è annullata"), /chiuse/);
+  assert.match(messaggioErrore("Non puoi portare ospiti a questa attività"), /familiari o amici/);
+  assert.match(messaggioErrore('new row for relation "impostazioni" violates check constraint "impostazioni_link_web"'), /social/);
+  assert.match(messaggioErrore('new row for relation "bacheca" violates check constraint "bacheca_link_web"'), /https/);
+  assert.match(messaggioErrore('new row for relation "adesioni" violates check constraint "adesioni_acc_valido"'), /12/);
+  assert.match(messaggioErrore("Non puoi cambiare il nome di un'altra persona"), /presidente/);
+  assert.equal(messaggioErrore("new row violates row-level security policy"), "");
+  assert.equal(messaggioErrore(undefined), "");
+});
+
+test("app.js senza sicurezza.js (vecchio index.html in cache): versioni prudenti, nessun errore", () => {
+  const js = fs.readFileSync(path.join(radice, "app.js"), "utf8");
+  const inizio = js.indexOf('if (typeof window.linkSicuro !== "function")');
+  const fine = js.indexOf("\n", js.indexOf('if (typeof window.messaggioErrore !== "function")'));
+  assert.ok(inizio > 0 && fine > inizio, "blocco di riserva mancante");
+  const finestra = {};
+  vm.runInNewContext(js.slice(inizio, fine), {window: finestra});
+  assert.equal(finestra.linkSicuro("javascript:alert(1)"), "");
+  assert.equal(finestra.percorsoDi("a/b.jpg", "a"), false);
+  assert.equal(finestra.accSicuri({}).length, 0);  // array di un altro contesto vm: si confronta la lunghezza
+  assert.equal(finestra.accSicuri([{nome: "Rosa"}, 3]).length, 1);
+  assert.equal(finestra.messaggioErrore("x"), "");
+  assert.ok(!/['()]/.test(finestra.urlCss("x.jpg');background:red")));
+  // con sicurezza.js caricato il blocco non sostituisce nulla
+  const gia = {linkSicuro, urlCss, percorsoDi, accSicuri, messaggioErrore};
+  vm.runInNewContext(js.slice(inizio, fine), {window: gia});
+  assert.equal(gia.linkSicuro, linkSicuro);
 });
 
 test("index.html: CSP presente e sicurezza.js caricato prima di app.js", () => {
@@ -53,7 +90,8 @@ test("index.html: CSP presente e sicurezza.js caricato prima di app.js", () => {
   assert.match(html, /http-equiv="Content-Security-Policy"/);
   assert.match(html, /object-src 'none'/);
   assert.ok(!/script-src[^;]*'unsafe-inline'/.test(html), "gli script inline non devono essere ammessi");
-  assert.ok(html.indexOf('src="sicurezza.js"') > -1 && html.indexOf('src="sicurezza.js"') < html.indexOf('src="app.js"'));
+  const s = html.indexOf('src="sicurezza.js?v='), a = html.indexOf('src="app.js?v=');
+  assert.ok(s > -1 && a > s, "sicurezza.js e app.js con versione, nell'ordine giusto");
 });
 
 test("app.js: i link e gli sfondi passano dai controlli", () => {
@@ -63,4 +101,5 @@ test("app.js: i link e gli sfondi passano dai controlli", () => {
   assert.ok(!/url\('\$\{esc\(img\)\}'\)/.test(js), "sfondo senza urlCss");
   assert.match(js, /percorsoDi\(f\.percorso, f\.user_id\)/);
   assert.match(js, /accSicuri\(a\.acc\)/);
+  assert.match(js, /messaggioErrore\(m\)/);
 });

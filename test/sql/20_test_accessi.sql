@@ -267,6 +267,17 @@ call t.conta('tesserati: il socio non li vede', :S, $q$select count(*) from publ
 call t.conta('tesserati: il direttivo li vede', :D, $q$select count(*) from public.tesserati$q$, 2);
 call t.conta('sveglia(): funziona anche da anon', null, $q$select public.sveglia()$q$, 5);
 
+-- =====================================================================
+-- 10. Permessi delle nuove funzioni
+-- =====================================================================
+call t.prova('funzioni: anon non esegue acc_valido → negato', null, $x$select public.acc_valido('[]')$x$, 'negato');
+call t.prova('funzioni: il socio esegue acc_valido (serve al vincolo) → consentito', :S, $x$select public.acc_valido('[]')$x$, 'consentito');
+call t.verifica('funzioni: nessuno può eseguire direttamente le funzioni dei trigger', null, 'select 1',
+  $c$not has_function_privilege('authenticated', 'public.controlla_adesione()', 'execute')
+     and not has_function_privilege('anon', 'public.controlla_foto()', 'execute')$c$);
+call t.verifica('funzioni: acc_valido ha search_path fisso', null, 'select 1',
+  $c$exists (select 1 from pg_proc where proname = 'acc_valido' and proconfig is not null)$c$);
+
 -- ---------- Riepilogo ----------
 \pset format unaligned
 \pset tuples_only on

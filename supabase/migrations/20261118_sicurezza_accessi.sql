@@ -76,7 +76,7 @@ create policy profili_modifica on public.profili for update
 -- ---------- 3. Adesioni: "acc" sempre una lista valida (N1) ----------
 -- Un "acc" che non è una lista faceva fallire conteggi() e bloccava l'app a tutti.
 create or replace function public.acc_valido(j jsonb) returns boolean
-language sql immutable as $$
+language sql immutable set search_path = '' as $$
   select case
     when j is null or jsonb_typeof(j) <> 'array' then false
     when jsonb_array_length(j) > 12 then false
@@ -222,5 +222,13 @@ begin
     raise notice 'Sessioni non chiuse: permesso mancante su auth.sessions';
   end;
 end $$;
+
+-- ---------- 9. Permessi delle nuove funzioni ----------
+-- Le funzioni dei trigger non servono a nessuno direttamente; acc_valido serve a chi
+-- salva un'adesione (il vincolo la esegue con i permessi di chi scrive).
+revoke execute on function public.acc_valido(jsonb) from public, anon;
+grant execute on function public.acc_valido(jsonb) to authenticated;
+revoke execute on function public.controlla_adesione() from public, anon, authenticated;
+revoke execute on function public.controlla_foto() from public, anon, authenticated;
 
 commit;

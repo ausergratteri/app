@@ -10,6 +10,15 @@ if (CFG.url) CFG.url = String(CFG.url).trim().replace(/\/rest\/v1\/?$/, "").repl
 const CONFIGURATA = !!(CFG.url && CFG.chiave && !CFG.url.includes("INCOLLA"));
 const DOMINIO_FINTO = "soci.ausergratteri.app"; // il telefono diventa un "indirizzo" interno: nessuna email viene inviata
 
+// Se sicurezza.js non è stato caricato (per esempio un vecchio index.html ancora in
+// cache dopo un aggiornamento) l'app non deve bloccarsi: si usano versioni prudenti
+// che nascondono i link, non cancellano file e scartano dati dubbi.
+if (typeof window.linkSicuro !== "function") window.linkSicuro = () => "";
+if (typeof window.urlCss !== "function") window.urlCss = u => encodeURI(String(u ?? "")).replace(/['()]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+if (typeof window.percorsoDi !== "function") window.percorsoDi = () => false;
+if (typeof window.accSicuri !== "function") window.accSicuri = acc => Array.isArray(acc) ? acc.filter(a => a && typeof a === "object") : [];
+if (typeof window.messaggioErrore !== "function") window.messaggioErrore = () => "";
+
 const S = {
   live: CONFIGURATA, sb: null, sessione: null, profilo: null,
   myId: null, myName: "", realRole: "lettore", viewRole: "lettore",
@@ -66,6 +75,26 @@ const api = {
   async rpc(fn, args) {
     if (S.live) { const {error} = await S.sb.rpc(fn, args); if (error) throw error; }
   },
+  // Importazione dei tesserati: tutto o niente, in una sola transazione nel database
+  async importaTesserati(piano, file, righeFile) {
+    if (S.live) {
+      const {data, error} = await S.sb.rpc("importa_tesserati", {nuovi: piano.nuovi, aggiornamenti: piano.aggiornamenti, file, righe_file: righeFile});
+      if (error) throw error;
+      return data || {};
+    }
+    let inseriti = 0, aggiornati = 0, saltati = 0;
+    D.tesserati = D.tesserati || [];
+    for (const n of piano.nuovi) {
+      if (D.tesserati.some(t => telChiave(t.telefono) === telChiave(n.telefono))) { saltati++; continue; }
+      D.tesserati.push({id: uuid(), nome: n.nome, telefono: n.telefono, email: n.email, numero_tessera: n.numero_tessera}); inseriti++;
+    }
+    for (const a of piano.aggiornamenti) {
+      const t = D.tesserati.find(x => x.id === a.id);
+      if (!t || Object.keys(a.attuali).some(k => String(t[k] ?? "") !== String(a.attuali[k] ?? ""))) { saltati++; continue; }
+      Object.assign(t, a.campi); aggiornati++;
+    }
+    return {inseriti, aggiornati, saltati};
+  },
   // Carica un'immagine nella cartella di chi la carica; le foto vengono ridotte a 1600 px
   async carica(file, riduci = true) {
     const blob = riduci ? await comprimi(file) : file;
@@ -95,7 +124,9 @@ async function safe(fn, ok) {
   try { await fn(); await carica(); if (ok) toast(ok); return true; }
   catch (e) {
     const m = String(e && (e.message || e.details) || "");
-    if (/row-level security|permission|Non puoi|Il direttivo|non può/i.test(m)) toast("Non hai il permesso per questa modifica.");
+    const chiaro = messaggioErrore(m);
+    if (chiaro) toast(chiaro);
+    else if (/row-level security|permission|Non puoi|Il direttivo|non può/i.test(m)) toast("Non hai il permesso per questa modifica.");
     else if (/duplicate key|una_adesione/i.test(m)) toast("Risulti già iscritto: modifica la tua iscrizione.");
     else if (/PIN/i.test(m)) toast(m);
     else toast("Non sono riuscito a salvare. Controlla la connessione e riprova.");
@@ -566,7 +597,7 @@ function vTesserati() {
   const ts = [...(S.tesserati || [])].sort((a, b) => a.nome.localeCompare(b.nome));
   const dentro = ts.filter(t => registrati.has(soloCifre(t.telefono)));
   const fuori = ts.filter(t => !registrati.has(soloCifre(t.telefono)));
-  const riga = t => `<div class="prow"><div class="who"><span class="n">${esc(t.nome)}</span><small>${esc(t.telefono || "senza telefono")}</small></div>
+  const riga = t => `<div class="prow"><div class="who"><span class="n">${esc(t.nome)}</span><small>${esc(t.telefono || "senza telefono")}${t.numero_tessera ? " · tessera " + esc(t.numero_tessera) : ""}${t.email ? " · " + esc(t.email) : ""}</small></div>
     <button class="btn ghost sm" data-act="togli-tesserato" data-id="${t.id}" aria-label="Togli ${esc(t.nome)} dall'elenco">Togli</button></div>`;
   return `<div class="box"><h3>Tesserati ${new Date().getFullYear()} · ${ts.length}</h3>
     <p class="meta" style="margin:0">Chi si registra con il numero che è in questo elenco entra subito come socio, senza aspettare l'approvazione.</p>
@@ -575,7 +606,106 @@ function vTesserati() {
     <form id="fTess" class="box" style="padding:12px">
       <b>Aggiungi un tesserato</b>
       <div class="two"><label class="f">Nome e cognome<input type="text" id="tsNome" required></label><label class="f">Telefono<input type="tel" id="tsTel" inputmode="tel"></label></div>
-      <button class="btn sm" type="submit">Aggiungi</button></form></div>`;
+      <button class="btn sm" type="submit">Aggiungi</button></form>
+    ${can("presidente") ? '<button class="btn ghost" data-act="importa">Importa dal gestionale (.xls)</button>' : ""}</div>`;
+}
+
+/* ---------- Importazione dei tesserati dal gestionale AUSER (.xls) ----------
+   La libreria SheetJS è una copia locale (vendor/), caricata solo qui e verificata
+   con l'integrity. Il file viene letto nel browser e non viene caricato da nessuna parte. */
+const XLSX_SRC = "vendor/sheetjs-0.20.3/xlsx.full.min.js";
+const XLSX_SRI = "sha384-EnyY0/GSHQGSxSgMwaIPzSESbqoOLSexfnSMN2AP+39Ckmn92stwABZynq1JyzdT";
+let xlsxInCarico = null, IMP = null;
+function caricaLibreriaXls() {
+  if (window.XLSX && window.XLSX.read) return Promise.resolve(window.XLSX);
+  return xlsxInCarico || (xlsxInCarico = new Promise((ok, ko) => {
+    const s = document.createElement("script");
+    s.src = XLSX_SRC; s.integrity = XLSX_SRI; s.crossOrigin = "anonymous";
+    s.onload = () => window.XLSX && window.XLSX.read ? ok(window.XLSX) : ko(new Error("libreria non disponibile"));
+    s.onerror = () => { xlsxInCarico = null; s.remove(); ko(new Error("libreria non caricata")); };
+    document.head.appendChild(s);
+  }));
+}
+
+// Solo il presidente importa: qui si nasconde il pulsante, ma il controllo vero è nel
+// database (importa_tesserati rifiuta chiunque non sia presidente).
+function formImporta() {
+  if (!can("presidente")) { toast("Solo il presidente può importare i tesserati."); return; }
+  if (typeof leggiXls !== "function") { toast("Aggiorna la pagina per usare l'importazione."); return; }
+  IMP = null;
+  sheet("Importa tesserati", `<div class="box"><p class="meta" style="margin:0">Scegli il file <b>.xls</b> esportato dal gestionale AUSER. Il file viene letto solo su questo dispositivo e non viene caricato da nessuna parte. Prima di cambiare l'anagrafica vedi un'anteprima e devi confermare.</p>
+    <label class="f">File del gestionale<input type="file" id="impFile" accept=".xls,.xlsx,application/vnd.ms-excel"></label>
+    <p class="err" id="impErr" role="alert"></p></div><div id="impCorpo"></div>`, {state: {kind: "importa"}});
+}
+
+async function leggiFileImport(file) {
+  const err = m => { $("#impErr").textContent = m; };
+  err(""); $("#impCorpo").innerHTML = ""; IMP = null;
+  if (!file) return;
+  if (!/\.xlsx?$/i.test(file.name)) return err("Scegli il file .xls esportato dal gestionale.");
+  if (file.size > IMPORT_MAX_BYTE) return err("Il file è troppo grande (massimo 5 MB).");
+  err("Leggo il file…");
+  try {
+    const X = await caricaLibreriaXls();
+    const lettura = leggiXls(X, new Uint8Array(await file.arrayBuffer()));
+    if (!lettura.intestazioni.length) return err("Nel file non trovo la riga con le intestazioni (Cognome, Nome, Cellulare…).");
+    IMP = {file: file.name.slice(0, 120), lettura, mappa: mappaColonne(lettura.intestazioni), aggiorna: new Set(), completaVuoti: false};
+    err(""); ricalcolaImport();
+  } catch (e) { console.error(e); err("Non riesco a leggere questo file. È il .xls esportato dal gestionale?"); }
+}
+
+function ricalcolaImport() {
+  IMP.esito = confrontaAnagrafica(preparaRighe(IMP.lettura, IMP.mappa), S.tesserati || []);
+  IMP.aggiorna.clear();
+  disegnaImport();
+}
+const pianoAttuale = () => pianoImport(IMP.esito, {aggiorna: [...IMP.aggiorna], completaVuoti: IMP.completaVuoti});
+function testoBottoneImport() {
+  const p = pianoAttuale();
+  return p.nuovi.length || p.aggiornamenti.length ? `Importa ${p.nuovi.length} nuovi e aggiorna ${p.aggiornamenti.length}` : "Niente da importare";
+}
+
+function disegnaImport() {
+  const {lettura, mappa, esito} = IMP, MAX = 50;
+  const opz = sel => `<option value="-1" ${sel < 0 ? "selected" : ""}>— non presente —</option>` +
+    lettura.intestazioni.map((h, j) => `<option value="${j}" ${sel === j ? "selected" : ""}>${esc(h)}</option>`).join("");
+  const manca = mappa.telefono < 0 || (mappa.nominativo < 0 && mappa.nome < 0 && mappa.cognome < 0);
+  const lista = (arr, f) => arr.slice(0, MAX).map(f).join("") + (arr.length > MAX ? `<p class="meta" style="margin:0">…e altre ${arr.length - MAX}: le trovi tutte nel report.</p>` : "");
+  const chi = r => `<span class="n">Riga ${r.n} · ${esc(r.nome || "senza nome")}</span><small>${esc(r.telOriginale || "—")}${r.email ? " · " + esc(r.email) : ""}${r.tessera ? " · tessera " + esc(r.tessera) : ""}</small>`;
+  const note = (l, cl) => l.map(x => `<small class="${cl}">${esc(x)}</small>`).join("");
+  const conAvvisi = [...esito.nuovi, ...esito.diversi].filter(r => r.avvisi.length);
+  const sez = (titolo, n, corpo, aperta) => n ? `<details class="box" ${aperta ? "open" : ""}><summary><b>${titolo} · ${n}</b></summary><div class="plist" style="margin-top:8px">${corpo}</div></details>` : "";
+  const p = pianoAttuale();
+  $("#impCorpo").innerHTML = `
+  <div class="box"><h3>Colonne del file</h3>
+    <p class="meta" style="margin:0">Foglio «${esc(lettura.foglio)}» · ${lettura.righe.length} righe${lettura.troncato ? ` (lette solo le prime ${IMPORT_MAX_RIGHE})` : ""}. Le intestazioni sono quelle originali del file: correggi se una colonna non è quella giusta.</p>
+    ${["cognome", "nome", "nominativo", "telefono", "email", "tessera"].map(k => `<label class="f">${ETICHETTE_IMPORT[k]}<select data-imp-col="${k}">${opz(mappa[k])}</select></label>`).join("")}
+    ${manca ? '<div class="banner warn">Indica almeno la colonna del telefono e quella del nome.</div>' : ""}</div>
+  ${manca ? "" : `
+  <div class="stats" style="grid-template-columns:1fr 1fr"><div class="stat"><b>${esito.nuovi.length}</b><span>nuovi</span></div><div class="stat"><b>${esito.uguali.length}</b><span>già presenti, uguali</span></div>
+    <div class="stat"><b>${esito.diversi.length}</b><span>diversi dall'anagrafica</span></div><div class="stat"><b>${esito.errori.length}</b><span>con errori (non importati)</span></div></div>
+  ${sez("Errori: correggili nel file e reimporta", esito.errori.length, lista(esito.errori, r => `<div class="prow col"><div class="who">${chi(r)}${note(r.errori, "err")}</div></div>`), true)}
+  ${esito.diversi.length ? `<div class="box"><h3>Diversi dall'anagrafica · ${esito.diversi.length}</h3>
+    <p class="meta" style="margin:0">Di base l'anagrafica <b>non viene cambiata</b>. Scegli tu riga per riga, oppure completa solo i campi vuoti.</p>
+    <label class="check"><input type="checkbox" id="impVuoti" ${IMP.completaVuoti ? "checked" : ""}> Completa solo i campi vuoti (es. email mancante)</label>
+    <div class="plist">${lista(esito.diversi, r => `<div class="prow col"><div class="who">${chi(r)}${r.diff.map(d => `<small>${esc(d.etichetta)}: «${esc(d.attuale || "vuoto")}» → «${esc(d.nuovo)}»</small>`).join("")}</div>
+      <label class="check"><input type="checkbox" data-imp-agg="${r.n}" ${IMP.aggiorna.has(r.n) ? "checked" : ""}> Usa i dati del file</label></div>`)}</div></div>` : ""}
+  ${sez("Nuovi tesserati", esito.nuovi.length, lista(esito.nuovi, r => `<div class="prow col"><div class="who">${chi(r)}</div></div>`), false)}
+  ${sez("Avvisi (si importano comunque)", conAvvisi.length, lista(conAvvisi, r => `<div class="prow col"><div class="who">${chi(r)}${note(r.avvisi, "meta")}</div></div>`), false)}
+  <div class="row"><button class="btn ghost" data-act="imp-report">Scarica il report</button>
+    <button class="btn sun" data-act="imp-conferma" ${p.nuovi.length || p.aggiornamenti.length ? "" : "disabled"}>${esc(testoBottoneImport())}</button></div>`}`;
+}
+
+function aggiornaBottoneImport() {
+  const b = $('[data-act="imp-conferma"]'); if (!b) return;
+  const p = pianoAttuale();
+  b.textContent = testoBottoneImport(); b.disabled = !(p.nuovi.length || p.aggiornamenti.length); delete b.dataset.confirm;
+}
+
+function scaricaReportImport() {
+  const url = URL.createObjectURL(new Blob([csvReport(IMP.esito)], {type: "text/csv;charset=utf-8"}));
+  const a = document.createElement("a"); a.href = url; a.download = "importazione-tesserati.csv";
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
 function formPin(id) {
@@ -1005,6 +1135,19 @@ document.addEventListener("click", async ev => {
       if (await safe(() => api.del("profili", id), "Richiesta rifiutata")) openView("soci"); return;
     case "pin": return formPin(id);
     case "mio-pin": return formMioPin();
+    case "importa": return formImporta();
+    case "imp-report": if (IMP && IMP.esito) scaricaReportImport(); return;
+    case "imp-conferma": {
+      if (!IMP || !IMP.esito || !can("presidente")) return;
+      const p = pianoAttuale(); if (!p.nuovi.length && !p.aggiornamenti.length) return;
+      if (!conferma(`Tocca di nuovo per confermare: ${p.nuovi.length} nuovi, ${p.aggiornamenti.length} aggiornati`)) return;
+      let ris = {};
+      if (await safe(async () => { ris = await api.importaTesserati(p, IMP.file, IMP.lettura.righe.length); })) {
+        IMP = null;
+        toast(`Importati ${ris.inseriti || 0} nuovi, aggiornati ${ris.aggiornati || 0}` + (ris.saltati ? `, ${ris.saltati} saltati perché cambiati nel frattempo` : ""));
+        openView("soci");
+      }
+      return; }
     case "togli-tesserato": if (!conferma("Tocca di nuovo")) return;
       if (await safe(() => api.del("tesserati", id), "Tolto dall'elenco")) openView("soci", null, true); return;
     case "bvista": S.bvista = t.dataset.v; render(); return;
@@ -1044,7 +1187,14 @@ document.addEventListener("keydown", ev => {
   if (LB) { if (ev.key === "Escape") chiudiLB(); if (ev.key === "ArrowLeft") { LB.i--; disegnaLB(); } if (ev.key === "ArrowRight") { LB.i++; disegnaLB(); } return; }
   if (ev.key === "Escape" && $("#sheet").innerHTML) closeSheet();
 });
-document.addEventListener("change", ev => { const el = ev.target.closest("[data-carica]"); if (el && el.files.length) { caricaFoto(el.dataset.carica, el.files); el.value = ""; } });
+document.addEventListener("change", ev => {
+  const el = ev.target.closest("[data-carica]"); if (el && el.files.length) { caricaFoto(el.dataset.carica, el.files); el.value = ""; }
+  if (ev.target.id === "impFile") return leggiFileImport(ev.target.files[0]);
+  if (!IMP || !IMP.esito) return;
+  if (ev.target.dataset.impCol) { IMP.mappa[ev.target.dataset.impCol] = Number(ev.target.value); return ricalcolaImport(); }
+  if (ev.target.dataset.impAgg) { const n = Number(ev.target.dataset.impAgg); if (ev.target.checked) IMP.aggiorna.add(n); else IMP.aggiorna.delete(n); return aggiornaBottoneImport(); }
+  if (ev.target.id === "impVuoti") { IMP.completaVuoti = ev.target.checked; return aggiornaBottoneImport(); }
+});
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.live && RANK[S.realRole] >= 1) carica().catch(() => {}); });
 
 /* =====================================================================

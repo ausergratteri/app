@@ -27,12 +27,13 @@ scenario() {  # nome file...
 }
 
 echo "== 1. Installazione nuova (supabase/schema.sql)"
-scenario nuovo $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql $T/20_test_accessi.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
+scenario nuovo $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql $T/20_test_accessi.sql $T/30_test_importazione.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/1.txt") PASS, $(grep -c '^FAIL' "$TMP/1.txt" || true) FAIL"
 
 echo "== 2. Database esistente ($BASE) + migrazione"
 scenario migrato $T/00_stub_supabase.sql "$TMP/schema_vecchio.sql" $T/10_dati_prova.sql $T/15_dati_rovinati.sql \
-  supabase/migrations/20261118_sicurezza_accessi.sql $T/20_test_accessi.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
+  supabase/migrations/20261118_sicurezza_accessi.sql supabase/migrations/20261119_importa_tesserati.sql \
+  $T/20_test_accessi.sql $T/30_test_importazione.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/2.txt") PASS, $(grep -c '^FAIL' "$TMP/2.txt" || true) FAIL"
 
 echo "== 3. Controllo: schema di $BASE senza correzioni (qui i FAIL sono attesi)"
