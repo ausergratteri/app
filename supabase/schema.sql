@@ -15,6 +15,27 @@ create table if not exists public.profili (
   creato_il   timestamptz not null default now()
 );
 
+-- Il numero di telefono ridotto alle sole cifre, senza prefisso +39
+create or replace function public.solo_cifre_tel(t text) returns text
+language sql immutable as $$
+  select case
+    when length(d) = 14 and d like '0039%' then substr(d, 5)
+    when length(d) = 12 and d like '39%' then substr(d, 3)
+    else d end
+  from (select regexp_replace(coalesce(t, ''), '\D', '', 'g') as d) x;
+$$;
+
+-- Elenco dei tesserati dell'anno (solo nome e telefono).
+-- Chi si registra con un numero di questo elenco entra subito come socio, senza attendere.
+create table if not exists public.tesserati (
+  id         uuid primary key default gen_random_uuid(),
+  nome       text not null,
+  telefono   text not null default '',
+  anno       int  not null default extract(year from now())::int,
+  creato_il  timestamptz not null default now()
+);
+create index if not exists tesserati_per_telefono on public.tesserati (public.solo_cifre_tel(telefono));
+
 -- Livello numerico del ruolo di chi sta usando l'app (0 = nessun accesso)
 create or replace function public.livello() returns int
 language sql stable security definer set search_path = public as $$
@@ -33,7 +54,13 @@ begin
     new.id,
     coalesce(new.raw_user_meta_data->>'nome', ''),
     coalesce(new.raw_user_meta_data->>'telefono', ''),
-    case when exists (select 1 from public.profili where ruolo = 'presidente') then 'in_attesa' else 'presidente' end
+    case
+      when not exists (select 1 from public.profili where ruolo = 'presidente') then 'presidente'
+      when public.solo_cifre_tel(new.raw_user_meta_data->>'telefono') <> ''
+           and exists (select 1 from public.tesserati t
+                       where public.solo_cifre_tel(t.telefono) = public.solo_cifre_tel(new.raw_user_meta_data->>'telefono'))
+        then 'socio'
+      else 'in_attesa' end
   );
   return new;
 end $$;
@@ -192,6 +219,12 @@ language sql stable security definer set search_path = public as $$
   group by a.attivita_id;
 $$;
 
+-- ---------- Tesserati: li vedono e modificano solo direttivo e presidente ----------
+alter table public.tesserati enable row level security;
+drop policy if exists tesserati_tutto on public.tesserati;
+create policy tesserati_tutto on public.tesserati for all
+  using (public.livello() >= 2) with check (public.livello() >= 2);
+
 -- ---------- Bacheca ----------
 create table if not exists public.bacheca (
   id         uuid primary key default gen_random_uuid(),
@@ -308,6 +341,8 @@ grant select, insert, update, delete on
   to authenticated;
 grant select, update on public.impostazioni to authenticated;
 grant select on public.impostazioni to anon;
+grant select, insert, update, delete on public.tesserati to authenticated;
+grant execute on function public.solo_cifre_tel(text) to authenticated;
 grant execute on function public.livello() to authenticated;
 grant execute on function public.conteggi() to authenticated;
 grant execute on function public.reimposta_pin(uuid, text) to authenticated;

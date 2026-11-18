@@ -109,13 +109,14 @@ async function carica() {
   if (S.live) {
     const q = t => S.sb.from(t).select("*");
     const r = await Promise.all([q("attivita"), q("assemblee"), q("adesioni"), q("bacheca"), q("impostazioni").eq("id", 1).maybeSingle(),
-      S.sb.rpc("conteggi"), RANK[S.realRole] >= 2 ? q("profili").order("nome") : Promise.resolve({data: []}), q("foto").order("creato_il")]);
+      S.sb.rpc("conteggi"), RANK[S.realRole] >= 2 ? q("profili").order("nome") : Promise.resolve({data: []}), q("foto").order("creato_il"),
+      RANK[S.realRole] >= 2 ? q("tesserati").order("nome") : Promise.resolve({data: []})]);
     const err = r.find(x => x.error); if (err) throw err.error;
     [att, ass, ades, post, imp] = r.map(x => x.data);
     S.cont = {}; (r[5].data || []).forEach(c => S.cont[c.attivita_id] = c.persone);
-    prof = r[6].data || []; S.foto = r[7].data || [];
+    prof = r[6].data || []; S.foto = r[7].data || []; S.tesserati = r[8].data || [];
   } else {
-    att = D.attivita; ass = D.assemblee; ades = D.adesioni; post = D.bacheca; imp = D.impostazioni[0]; prof = D.profili; S.foto = [...D.foto];
+    att = D.attivita; ass = D.assemblee; ades = D.adesioni; post = D.bacheca; imp = D.impostazioni[0]; prof = D.profili; S.foto = [...D.foto]; S.tesserati = [...(D.tesserati || [])];
     S.cont = {};
     ades.forEach(a => S.cont[a.attivita_id] = (S.cont[a.attivita_id] || 0) + (a.io ? 1 : 0) + (a.acc || []).length);
   }
@@ -262,7 +263,7 @@ function vAccesso() {
         <label class="f">Ripeti il PIN<input type="password" id="rPin2" inputmode="numeric" autocomplete="new-password" minlength="6" required></label>
         <p class="err" id="rErr" role="alert"></p>
         <button class="btn sun block" type="submit">Registrati</button>
-        <p class="meta" style="margin:0">Dopo la registrazione il direttivo conferma che sei socio. Il numero serve solo per entrare: non riceverai messaggi.</p>
+        <p class="meta" style="margin:0">Se sei tesserato e usi il numero che hai dato all'Auser, entri subito. Altrimenti il direttivo conferma che sei socio. Il numero serve solo per entrare: non riceverai messaggi.</p>
       </form>`}
     </div></div>`;
 }
@@ -329,7 +330,7 @@ function vHome() {
     ${posts.length ? posts.map(postCard).join("") : '<div class="empty">Nessun avviso per ora.</div>'}</section>
   ${ultimeFoto()}
   ${soc.length ? `<section class="sec"><div class="sechead"><h2>Seguici</h2></div><div class="social">${soc.map(([k,l,ic]) => `<a class="sbtn" href="${esc(c[k])}" target="_blank" rel="noopener">${ic}${l}</a>`).join("")}</div></section>` : ""}
-  <section class="sec"><button class="link" data-act="esci">Esci dall'app</button></section>`;
+  <section class="sec"><div class="row"><button class="btn ghost" data-act="mio-pin">Cambia il mio PIN</button><button class="btn ghost" data-act="esci">Esci dall'app</button></div></section>`;
 }
 
 function vAttivita() {
@@ -472,7 +473,7 @@ function gestionePartecipanti(e) {
 }
 
 function vEvento(e) {
-  return `${e.immagine ? `<img class="imgprev" style="max-height:220px;width:100%" src="${esc(e.immagine)}" alt="">` : ""}
+  return `${e.immagine ? `<img class="imgprev" style="max-height:420px;width:100%;object-fit:contain;background:var(--soft)" src="${esc(e.immagine)}" alt="Locandina: ${esc(e.titolo)}">` : ""}
   <div class="pills"><span class="pill ${e.tipo}">${TIPI[e.tipo]}</span>${e.stato === "annullata" ? '<span class="pill no">Annullata</span>' : !aperta(e) ? '<span class="pill">Iscrizioni chiuse</span>' : '<span class="pill ok">Iscrizioni aperte</span>'}</div>
   <div class="box"><dl class="kv">
     <dt>Quando</dt><dd>${esc(fmtLongY(e.data))}${e.ora ? ", " + esc(fmtOra(e.ora)) : ""}</dd>
@@ -522,7 +523,25 @@ function vSoci() {
         ${pres && r === "direttivo" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Togli dal direttivo</button>` : ""}
         ${r !== "presidente" && (pres || r !== "direttivo") ? `<button class="btn ghost sm" data-act="pin" data-id="${p.id}">Nuovo PIN</button>` : ""}
       </div></div>`).join("") : '<div class="empty">Nessuna richiesta.</div>'}</div></div>`;
-  }).join("") + `<p class="meta" style="margin:0">Chi non usa lo smartphone non serve registrarlo: lo aggiungi direttamente tra i partecipanti di ogni gita.</p>`;
+  }).join("") + vTesserati() + `<p class="meta" style="margin:0">Chi non usa lo smartphone non serve registrarlo: lo aggiungi direttamente tra i partecipanti di ogni gita.</p>`;
+}
+
+/* Tesserati: chi si registra con uno di questi numeri entra subito come socio */
+function vTesserati() {
+  const registrati = new Set(S.profili.map(p => soloCifre(p.telefono)).filter(Boolean));
+  const ts = [...(S.tesserati || [])].sort((a, b) => a.nome.localeCompare(b.nome));
+  const dentro = ts.filter(t => registrati.has(soloCifre(t.telefono)));
+  const fuori = ts.filter(t => !registrati.has(soloCifre(t.telefono)));
+  const riga = t => `<div class="prow"><div class="who"><span class="n">${esc(t.nome)}</span><small>${esc(t.telefono || "senza telefono")}</small></div>
+    <button class="btn ghost sm" data-act="togli-tesserato" data-id="${t.id}" aria-label="Togli ${esc(t.nome)} dall'elenco">Togli</button></div>`;
+  return `<div class="box"><h3>Tesserati ${new Date().getFullYear()} · ${ts.length}</h3>
+    <p class="meta" style="margin:0">Chi si registra con il numero che è in questo elenco entra subito come socio, senza aspettare l'approvazione.</p>
+    <div class="stats" style="grid-template-columns:1fr 1fr"><div class="stat"><b>${dentro.length}</b><span>già nell'app</span></div><div class="stat"><b>${fuori.length}</b><span>da invitare</span></div></div>
+    ${fuori.length ? `<details><summary class="link" style="display:inline-block">Chi non si è ancora registrato</summary><div class="plist" style="margin-top:8px">${fuori.map(riga).join("")}</div></details>` : ""}
+    <form id="fTess" class="box" style="padding:12px">
+      <b>Aggiungi un tesserato</b>
+      <div class="two"><label class="f">Nome e cognome<input type="text" id="tsNome" required></label><label class="f">Telefono<input type="tel" id="tsTel" inputmode="tel"></label></div>
+      <button class="btn sm" type="submit">Aggiungi</button></form></div>`;
 }
 
 function formPin(id) {
@@ -533,6 +552,26 @@ function formPin(id) {
   $("#fPin").addEventListener("submit", async ev => {
     ev.preventDefault();
     if (await safe(() => api.rpc("reimposta_pin", {utente: id, pin: $("#pPin").value.trim()}), "PIN cambiato")) openView("soci");
+  });
+}
+
+/* ---------- Ognuno può cambiare il proprio PIN ---------- */
+function formMioPin() {
+  sheet("Cambia il tuo PIN", `<form id="fMioPin">
+    <label class="f">Nuovo PIN <span class="h">Almeno 6 cifre</span><input type="password" id="mp1" inputmode="numeric" autocomplete="new-password" minlength="6" required></label>
+    <label class="f">Ripeti il nuovo PIN<input type="password" id="mp2" inputmode="numeric" autocomplete="new-password" minlength="6" required></label>
+    <p class="err" id="mpErr" role="alert"></p>
+    <button class="btn sun block" type="submit">Salva il nuovo PIN</button></form>`);
+  $("#fMioPin").addEventListener("submit", async ev => {
+    ev.preventDefault();
+    const a = $("#mp1").value, b = $("#mp2").value, out = m => $("#mpErr").textContent = m;
+    if (a.length < 6) return out("Il PIN deve avere almeno 6 cifre.");
+    if (a !== b) return out("I due PIN non sono uguali.");
+    if (!S.live) { toast("In modalità prova il PIN non si cambia davvero."); return closeSheet(); }
+    out("Salvo…");
+    const {error} = await S.sb.auth.updateUser({password: a});
+    if (error) return out(/same|different/i.test(error.message) ? "È uguale a quello di prima: scegline uno diverso." : "Non sono riuscito a cambiarlo: " + error.message);
+    closeSheet(); toast("PIN cambiato. Dalla prossima volta entra con quello nuovo.");
   });
 }
 
@@ -810,7 +849,8 @@ function ultimeFoto() {
     <div class="grid3">${ult.map(f => thumb(f, f.attivita_id, fotoDi(f.attivita_id).indexOf(f))).join("")}</div></section>`;
 }
 async function caricaFoto(eid, files) {
-  const lista = [...files].slice(0, 20), out = () => $("#up-" + eid);
+  const max = can("direttivo") ? 100 : 20;
+  const lista = [...files].slice(0, max), out = () => $("#up-" + eid);
   let ok = 0;
   for (let i = 0; i < lista.length; i++) {
     if (out()) out().textContent = `Carico la foto ${i + 1} di ${lista.length}…`;
@@ -821,7 +861,7 @@ async function caricaFoto(eid, files) {
     } catch (e) { console.error(e); }
   }
   try { await carica(); } catch (e) {}
-  if (files.length > 20) toast("Puoi caricare fino a 20 foto per volta.");
+  if (files.length > max) toast(`Puoi caricare fino a ${max} foto per volta: ne ho caricate ${ok}.`);
   else toast(ok === lista.length ? (ok === 1 ? "Foto pubblicata. Grazie!" : ok + " foto pubblicate. Grazie!") : `Pubblicate ${ok} foto su ${lista.length}: le altre non sono riuscite.`);
 }
 
@@ -923,6 +963,9 @@ document.addEventListener("click", async ev => {
     case "rifiuta": if (!conferma("Tocca di nuovo per rifiutare")) return;
       if (await safe(() => api.del("profili", id), "Richiesta rifiutata")) openView("soci"); return;
     case "pin": return formPin(id);
+    case "mio-pin": return formMioPin();
+    case "togli-tesserato": if (!conferma("Tocca di nuovo")) return;
+      if (await safe(() => api.del("tesserati", id), "Tolto dall'elenco")) openView("soci", null, true); return;
     case "bvista": S.bvista = t.dataset.v; render(); return;
     case "gallerie": S.tab = "bacheca"; S.bvista = "gallerie"; render(); window.scrollTo(0, 0); return;
     case "galleria": return openView("galleria", id);
@@ -946,9 +989,15 @@ document.addEventListener("click", async ev => {
     case "copia-lista": return copia(testoLista(id));
   }
 });
-document.addEventListener("submit", ev => {
+document.addEventListener("submit", async ev => {
   if (ev.target.id === "fLogin") entra(ev);
   if (ev.target.id === "fReg") registrati(ev);
+  if (ev.target.id === "fTess") {
+    ev.preventDefault();
+    const nome = $("#tsNome").value.trim(), telefono = soloCifre($("#tsTel").value);
+    if (!nome) return;
+    if (await safe(() => api.ins("tesserati", {nome, telefono, anno: new Date().getFullYear()}), "Tesserato aggiunto")) openView("soci", null, true);
+  }
 });
 document.addEventListener("keydown", ev => {
   if (LB) { if (ev.key === "Escape") chiudiLB(); if (ev.key === "ArrowLeft") { LB.i--; disegnaLB(); } if (ev.key === "ArrowRight") { LB.i++; disegnaLB(); } return; }
@@ -963,7 +1012,16 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 async function caricaProfilo() {
   const u = S.sessione?.user; if (!u) return;
   S.myId = u.id;
-  const {data} = await S.sb.from("profili").select("*").eq("id", u.id).maybeSingle();
+  const {data, error} = await S.sb.from("profili").select("*").eq("id", u.id).maybeSingle();
+  if (error) {
+    S.loading = false; S.realRole = S.viewRole = "lettore";
+    $("#tabs").innerHTML = "";
+    $("#app").innerHTML = testata("Un attimo…", "Non riesco a leggere il tuo profilo.", false) + `<main><div class="box"><h3>Problema di collegamento</h3>
+      <p style="margin:0">L'app non riesce a leggere i dati dal database. Riprova tra poco; se succede ancora, avvisa il presidente.</p>
+      <p class="meta" style="margin:0">Dettaglio per il presidente: ${esc(error.message || error.code || "errore sconosciuto")}</p>
+      <button class="btn ghost" data-act="ricarica">Riprova</button><button class="btn ghost" data-act="esci">Esci</button></div></main>`;
+    return;
+  }
   S.profilo = data;
   S.myName = data?.nome || u.user_metadata?.nome || "";
   const r = data?.ruolo;
@@ -1020,6 +1078,7 @@ function demoMode() {
   D.foto = [["#F6B26B","#E06666","#6A994E"],["#9FC5E8","#F9CB9C","#38761D"],["#FFD966","#E69138","#274E13"],["#B4A7D6","#F4CCCC","#6AA84F"],["#A2C4C9","#FCE5CD","#3D85C6"]]
     .map((pal, i) => ({id: "f" + i, attivita_id: "p1", user_id: i % 2 ? "s1" : "io", autore: i % 2 ? "Maria Rossi" : "Presidente", url: fotoFinta(pal, i), percorso: "",
       didascalia: ["Si parte dalla piazza", "La pineta", "Castagne sul fuoco", "Tutti insieme", "Il rientro al tramonto"][i], creato_il: "2026-10-2" + i}));
+  D.tesserati = [{id: "t1", nome: "Maria Rossi", telefono: "3331111111"}, {id: "t2", nome: "Giovanni Bianchi", telefono: "3334444444"}];
   D.profili = [
     {id: "io", nome: "Presidente", telefono: "3330000000", ruolo: "presidente"},
     {id: "s1", nome: "Maria Rossi", telefono: "3331111111", ruolo: "socio"},
