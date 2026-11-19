@@ -92,6 +92,29 @@ Note:
   nuove scritture: correggere il tema e poi `validate constraint` (comando nel messaggio).
 * Nessuna funzione cambia: le impronte qui sotto restano valide.
 
+## Registrazione con codice via e-mail (20261123) – NON ancora in produzione
+
+Risolve la registrazione "al posto di un tesserato" (vuln-0001). Dettagli, segreti, Gmail e
+pubblicazione della funzione server: `../functions/registrazione/LEGGIMI.md`.
+
+| Passo | Cosa | Dove | Modifica? |
+|---|---|---|---|
+| O1 | `13_controlla_registrazione.sql`: quanti tesserati hanno l'e-mail, e-mail condivise, ecc. (solo numeri) | SQL Editor | No |
+| O2 | Password per le app di Gmail e segreti della funzione (con `EMAIL_CONSENTITE` = solo la propria e-mail) | Google + Supabase | Sì (configurazione) |
+| O3 | `../migrations/20261123_registrazione_otp.sql` | SQL Editor | Sì (funzioni, tabella privata, `nuovo_profilo`) |
+| O4 | `supabase functions deploy registrazione --no-verify-jwt` | Terminale | Sì |
+| O5 | Pubblicare la nuova app (`app.js`, `index.html`) | GitHub Pages | Sì |
+| O6 | Prova con la propria e-mail (vedi la guida della funzione) | App | Solo dati di prova |
+| O7 | Supabase Auth: **Allow new users to sign up** disattivato | Pannello | Sì (impostazione) |
+| O8 | Togliere `EMAIL_CONSENTITE` (apertura a tutti i soci) | Supabase | Sì |
+| — | `12_rollback_registrazione_otp.sql` + app precedente + riattivare le iscrizioni pubbliche | | Sì |
+
+Note:
+* Ordine importante: O3 prima di O5 (la nuova app usa la funzione server), O4 prima di O5.
+  Tra O3 e O5 la vecchia app continua a registrare, ma i nuovi account restano "in attesa"
+  (il direttivo li approva): nessuno viene bloccato e nessuno entra senza verifica.
+* Gli account esistenti, i PIN e i ruoli non cambiano. L'accesso con telefono e PIN resta uguale.
+
 ## Impronte attese delle funzioni (controllo "FOTOGRAFIA DELLA STRUTTURA")
 
 `left(md5(prosrc), 8)` dopo le migrazioni (20261121 non cambia funzioni):
@@ -104,6 +127,8 @@ Note:
 | controlla_foto | 5e2884a0 dopo 20261118, 4fc9e77e dopo 20261120 |
 | controlla_ruolo | cdb7ca58 |
 | importa_tesserati | 36f1f714 |
-| nuovo_profilo | d08f0d69 |
+| nuovo_profilo | d08f0d69 fino a 20261122; **758f505f** dopo 20261123 |
 | reimposta_pin | bf88cbc1 |
 | livello / pulisci_adesioni / solo_cifre_tel / sveglia | invariate (1d5541a5 / c7966924 / 2dcd1ade / ccea2d8b) |
+| registrazione_avvia / _verifica / _gettone / _riprendi / _manuale_consentita (dopo 20261123) | 6b704981 / 771510cd / ade4e798 / 4d54e588 / cf293dc3 |
+| registrazione.consuma / parole / nomi_corrispondono (dopo 20261123) | f2813a1c / 4d146bf2 / 26bd802d |

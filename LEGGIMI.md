@@ -53,6 +53,12 @@ Per farlo funzionare:
 1. Menu **Authentication** → **Sign In / Providers** → **Email**.
 2. Disattiva **Confirm email** e salva.
 
+**Registrazione con codice via e-mail.** Chi si registra riceve un codice di 6 cifre
+all'indirizzo e-mail che l'associazione ha nell'elenco dei tesserati, e solo dopo sceglie
+il PIN. La gestisce la funzione server `supabase/functions/registrazione` (vedi
+`supabase/functions/registrazione/LEGGIMI.md` per segreti, Gmail e pubblicazione). Chi non ha
+un'e-mail registrata può chiedere la verifica al direttivo dalla stessa schermata.
+
 ## 4. Collega l'app al database
 
 1. Menu **Project Settings** → **API Keys** (o **Data API**).
@@ -87,16 +93,19 @@ Non usare mai la chiave **secret** o **service_role**: quella non va mai messa n
 
 ## 6. Primo accesso: il presidente
 
-**Il primo che si registra diventa automaticamente presidente.** Quindi, appena l'app è online:
+**Nessuno diventa presidente registrandosi** (nemmeno il primo): il presidente lo nomina chi
+amministra Supabase. Quindi, appena l'app è online:
 
 1. Apri l'indirizzo dal telefono.
-2. *Primo accesso*: nome, numero e PIN → *Registrati*.
-3. Entri come presidente. In **Gestione → Logo, colori e social** carica il logo e i link Facebook e Instagram.
+2. *Primo accesso* → *Non ho un'e-mail registrata: chiedo al direttivo* → nome, cognome, numero e PIN → *Invia la richiesta*.
+3. In Supabase, **SQL Editor**: apri `supabase/operazioni/14_nomina_primo_presidente.sql`, scrivi il numero
+   al posto di `3XXXXXXXXX` ed esegui. Funziona solo se non c'è ancora un presidente.
+4. Rientra nell’app: ora sei presidente. In **Gestione → Logo, colori e social** carica il logo e i link Facebook e Instagram.
 
 ## 7. Direttivo e soci
 
-- Manda il link ai soci (anche nel canale WhatsApp). Ognuno fa *Primo accesso*.
-- In **Gestione → Soci** il presidente o il direttivo tocca **Approva**. Prima dell'approvazione chi si registra non vede niente.
+- Manda il link ai soci (anche nel canale WhatsApp). Ognuno fa *Primo accesso*: i tesserati con l'e-mail in elenco ricevono un codice ed entrano subito come soci.
+- Chi non ha l'e-mail in elenco chiede la verifica: in **Gestione → Soci** il presidente o il direttivo, dopo aver controllato chi è, tocca **Approva**. Prima dell'approvazione chi si registra non vede niente.
 - Per i membri del direttivo: il presidente tocca **Nel direttivo**.
 - PIN dimenticato: **Gestione → Soci → Nuovo PIN**. Il direttivo può farlo per i soci, il presidente per tutti.
 - Chi non ha lo smartphone non serve registrarlo: lo aggiungi a mano tra i partecipanti di ogni gita.

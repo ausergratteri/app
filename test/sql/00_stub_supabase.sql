@@ -3,6 +3,8 @@
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
   if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  -- Come in Supabase: la chiave secret (service role) salta RLS; la usa solo la funzione server
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
 end $$;
 create schema auth;
 create schema storage;
@@ -12,6 +14,7 @@ create table auth.users (
   id                 uuid primary key,
   email              text unique,
   raw_user_meta_data jsonb not null default '{}'::jsonb,
+  raw_app_meta_data  jsonb not null default '{}'::jsonb,   -- lo scrive solo l'API admin (service role)
   encrypted_password text
 );
 create table auth.sessions (
