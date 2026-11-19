@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import {gestisci, codiceDaByte, configSmtp, indirizzoLocale, verificaIpSmtp, messaggioEmail, ipDaIntestazioni, MESSAGGIO_AVVIO, MESSAGGIO_MANUALE} from "../supabase/functions/registrazione/logica.ts";
+import {gestisci, chiaveServizio, codiceDaByte, configSmtp, indirizzoLocale, verificaIpSmtp, messaggioEmail, ipDaIntestazioni, MESSAGGIO_AVVIO, MESSAGGIO_MANUALE} from "../supabase/functions/registrazione/logica.ts";
 import fs from "node:fs";
 
 const RICHIESTA = "11111111-2222-4333-8444-555555555555";
@@ -440,4 +440,42 @@ test("SMTP: index.ts crea il trasporto solo con configurazione valida, verifica 
   assert.match(src, /const t = await trasporto\(\);\s*if \(!t\) throw new Error\("smtp_non_configurato"\);/);
   assert.ok(!/host:\s*"smtp\.gmail\.com"/.test(src), "nessun host scritto direttamente nel trasporto");
   assert.ok(!/log\([^)]*ipAtteso/.test(src) && !/log\([^)]*address/.test(src), "nessun IP nei registri");
+});
+
+// ---------- Chiave di servizio fornita da Supabase alla funzione ----------
+const SEGRETA = "sb_secret_" + "A1b2C3d4E5f6G7h8I9j0kL";
+const LEGACY = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.firmaFintaDiProva_123";
+const PUBBLICA = "sb_publishable_" + "A1b2C3d4E5f6G7h8I9j0kL";
+const ambienteChiavi = o => k => o[k] ?? "";
+test("chiave: si usa SUPABASE_SECRET_KEYS['default'] anche se c'è la legacy", () => {
+  assert.deepEqual(chiaveServizio(ambienteChiavi({SUPABASE_SECRET_KEYS: JSON.stringify({default: SEGRETA, altra: "sb_secret_zzzzzzzzzzzzzzzzzzzz"}), SUPABASE_SERVICE_ROLE_KEY: LEGACY})),
+    {chiave: SEGRETA, fonte: "secret_keys_default"});
+  assert.equal(chiaveServizio(ambienteChiavi({SUPABASE_SECRET_KEYS: "  " + JSON.stringify({default: " " + SEGRETA + " "}) + "\n"})).chiave, SEGRETA, "spazi tolti");
+});
+test("chiave: dizionario mancante o malformato → si passa alla legacy (mai un'eccezione)", () => {
+  for (const v of ["", "non-json", "{", "null", "[]", JSON.stringify([SEGRETA]), JSON.stringify({}), JSON.stringify({default: 123}),
+    JSON.stringify({default: ""}), JSON.stringify({default: PUBBLICA}), JSON.stringify({default: "sb_secret_corta"}),
+    JSON.stringify({default: "sb_secret_" + "x".repeat(300)}), JSON.stringify({Default: SEGRETA}), JSON.stringify({default: SEGRETA + " altro"})]) {
+    assert.deepEqual(chiaveServizio(ambienteChiavi({SUPABASE_SECRET_KEYS: v, SUPABASE_SERVICE_ROLE_KEY: LEGACY})),
+      {chiave: LEGACY, fonte: "service_role_legacy"}, JSON.stringify(v));
+  }
+});
+test("chiave: SUPABASE_SECRET_KEY singola se valida, prima della legacy", () => {
+  assert.deepEqual(chiaveServizio(ambienteChiavi({SUPABASE_SECRET_KEY: SEGRETA, SUPABASE_SERVICE_ROLE_KEY: LEGACY})), {chiave: SEGRETA, fonte: "secret_key"});
+  assert.deepEqual(chiaveServizio(ambienteChiavi({SUPABASE_SECRET_KEY: PUBBLICA, SUPABASE_SERVICE_ROLE_KEY: LEGACY})), {chiave: LEGACY, fonte: "service_role_legacy"});
+});
+test("chiave: nessuna fonte valida → chiave vuota (la funzione risponde 503)", () => {
+  for (const o of [{}, {SUPABASE_SERVICE_ROLE_KEY: "non-jwt"}, {SUPABASE_SERVICE_ROLE_KEY: PUBBLICA}, {SUPABASE_SECRET_KEYS: "{}", SUPABASE_SECRET_KEY: "x"},
+    {SUPABASE_SECRET_KEYS: JSON.stringify({default: PUBBLICA})}, {SUPABASE_SERVICE_ROLE_KEY: "eyJ.solo-due"}]) {
+    assert.deepEqual(chiaveServizio(ambienteChiavi(o)), {chiave: "", fonte: "assente"}, JSON.stringify(o));
+  }
+});
+test("chiave: index.ts usa chiaveServizio, registra solo la fonte e risponde 503 senza chiave", () => {
+  const src = fs.readFileSync(new URL("../supabase/functions/registrazione/index.ts", import.meta.url), "utf8");
+  assert.match(src, /const \{chiave: CHIAVE, fonte: FONTE_CHIAVE\} = chiaveServizio\(ambiente\);/);
+  assert.match(src, /evento: "chiave_servizio", fonte: FONTE_CHIAVE\}/);
+  assert.ok(!/ambiente\("SUPABASE_(SECRET_KEY|SERVICE_ROLE_KEY|SECRET_KEYS)"\)/.test(src), "nessuna lettura diretta delle chiavi in index.ts");
+  const righeLog = src.split("\n").filter(r => /\blog\(/.test(r));
+  assert.ok(righeLog.length > 0 && righeLog.every(r => !/(^|[^_A-Za-z])CHIAVE\b/.test(r) && !/\bambiente\("SUPABASE_/.test(r)), "la chiave non finisce nei registri");
+  assert.match(src, /if \(!SMTP\.ok \|\| !URL_PROGETTO \|\| !CHIAVE \|\|/);
 });

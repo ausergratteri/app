@@ -102,6 +102,7 @@ pubblicazione della funzione server: `../functions/registrazione/LEGGIMI.md`.
 | O1 | `13_controlla_registrazione.sql`: quanti tesserati hanno l'e-mail, e-mail condivise, ecc. (solo numeri) | SQL Editor | No |
 | O2 | Password per le app di Gmail e segreti della funzione (con `EMAIL_CONSENTITE` = solo la propria e-mail) | Google + Supabase | Sì (configurazione) |
 | O3 | `../migrations/20261123_registrazione_otp.sql` | SQL Editor | Sì (funzioni, tabella privata, `nuovo_profilo`) |
+| O3b | `../migrations/20261124_minimo_privilegio_tabelle.sql`: toglie ad anon e authenticated TRUNCATE, REFERENCES e TRIGGER sulle tabelle dell'app (anche per le tabelle future) | SQL Editor | Sì (solo permessi) |
 | O4 | `supabase functions deploy registrazione --no-verify-jwt` | Terminale | Sì |
 | O5 | Pubblicare la nuova app (`app.js`, `index.html`) | GitHub Pages | Sì |
 | O6 | Prova con la propria e-mail (vedi la guida della funzione) | App | Solo dati di prova |

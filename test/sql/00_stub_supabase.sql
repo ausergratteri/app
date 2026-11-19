@@ -9,6 +9,9 @@ end $$;
 create schema auth;
 create schema storage;
 create schema extensions;
+-- Come nei progetti Supabase del 2026: le nuove tabelle di public ricevono per impostazione
+-- predefinita TRUNCATE, REFERENCES e TRIGGER per anon e authenticated (il DML no).
+alter default privileges in schema public grant truncate, references, trigger on tables to anon, authenticated;
 
 create table auth.users (
   id                 uuid primary key,

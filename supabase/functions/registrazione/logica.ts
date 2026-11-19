@@ -57,6 +57,32 @@ export function ipDaIntestazioni(leggi: (nome: string) => string | null): {ip: s
   return {ip: "sconosciuto", fonte: "nessuna"};
 }
 
+// Chiave di servizio che Supabase fornisce alla funzione (mai scritta nei registri). Ordine:
+//  1. SUPABASE_SECRET_KEYS: dizionario JSON delle chiavi nuove, voce "default" (sb_secret_…);
+//  2. SUPABASE_SECRET_KEY: chiave singola (sb_secret_… o JWT), se presente;
+//  3. SUPABASE_SERVICE_ROLE_KEY: chiave legacy (JWT), in dismissione.
+// Valore mancante o malformato (JSON non valido, voce assente, formato sbagliato, chiave pubblica):
+// si passa alla fonte successiva. Nessuna fonte valida → chiave vuota: la funzione risponde 503 e
+// non tenta nulla. Restituisce anche la fonte usata (solo il nome, per il registro).
+const SECRET_NUOVA = /^sb_secret_[A-Za-z0-9_-]{16,200}$/;
+const JWT = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+export type FonteChiave = "secret_keys_default" | "secret_key" | "service_role_legacy" | "assente";
+export function chiaveServizio(leggi: (k: string) => string): {chiave: string; fonte: FonteChiave} {
+  const dizionario = (leggi("SUPABASE_SECRET_KEYS") || "").trim();
+  if (dizionario) {
+    try {
+      const d: unknown = JSON.parse(dizionario);
+      const v = d && typeof d === "object" && !Array.isArray(d) ? (d as Record<string, unknown>)["default"] : undefined;
+      if (typeof v === "string" && SECRET_NUOVA.test(v.trim())) return {chiave: v.trim(), fonte: "secret_keys_default"};
+    } catch { /* dizionario malformato: fonte successiva */ }
+  }
+  const singola = (leggi("SUPABASE_SECRET_KEY") || "").trim();
+  if (SECRET_NUOVA.test(singola) || JWT.test(singola)) return {chiave: singola, fonte: "secret_key"};
+  const legacy = (leggi("SUPABASE_SERVICE_ROLE_KEY") || "").trim();
+  if (JWT.test(legacy)) return {chiave: legacy, fonte: "service_role_legacy"};
+  return {chiave: "", fonte: "assente"};
+}
+
 // Parametri SMTP dall'ambiente. Senza impostazioni: Gmail, 465, TLS (produzione invariata).
 // SMTP_SICURO="0" esatto = niente TLS e NESSUNA credenziale, ammesso SOLO verso il computer locale
 // o il servizio Mailpit dello stack Supabase locale (container "supabase_inbucket_<progetto>" o

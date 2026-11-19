@@ -17,16 +17,19 @@
 //                            verso localhost/127.0.0.1/::1 o il Mailpit locale (supabase_inbucket_… o "inbucket")
 //    SMTP_IP_ATTESO          (obbligatorio con SMTP_SICURO="0") IP esatto del container Mailpit sulla
 //                            rete Docker di prova: il nome deve risolversi SOLO a questo indirizzo
-//  Forniti da Supabase: SUPABASE_URL e la chiave secret/service role.
+//  Forniti da Supabase: SUPABASE_URL e la chiave di servizio: SUPABASE_SECRET_KEYS["default"]
+//  (chiavi nuove), altrimenti SUPABASE_SECRET_KEY o la legacy SUPABASE_SERVICE_ROLE_KEY (vedi
+//  chiaveServizio in logica.ts). Nel registro solo il NOME della fonte usata, mai il valore.
 // =====================================================================
 import {createClient} from "jsr:@supabase/supabase-js@2.49.4";
 import nodemailer from "npm:nodemailer@6.9.16";
 import {lookup} from "node:dns/promises";
-import {codiceDaByte, configSmtp, gestisci, ipDaIntestazioni, verificaIpSmtp, type Dip} from "./logica.ts";
+import {chiaveServizio, codiceDaByte, configSmtp, gestisci, ipDaIntestazioni, verificaIpSmtp, type Dip} from "./logica.ts";
 
 const ambiente = (k: string) => Deno.env.get(k) ?? "";
 const URL_PROGETTO = ambiente("SUPABASE_URL");
-const CHIAVE = ambiente("SUPABASE_SECRET_KEY") || ambiente("SUPABASE_SERVICE_ROLE_KEY");
+const {chiave: CHIAVE, fonte: FONTE_CHIAVE} = chiaveServizio(ambiente);
+console.log(JSON.stringify({funzione: "registrazione", evento: "chiave_servizio", fonte: FONTE_CHIAVE}));
 const PEPE = ambiente("REGISTRAZIONE_PEPE");
 const ORIGINE = ambiente("ORIGINE_CONSENTITA") || "https://ausergratteri.github.io";
 const CONSENTITE = ambiente("EMAIL_CONSENTITE").split(",").map(x => x.trim().toLowerCase()).filter(Boolean);
