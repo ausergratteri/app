@@ -1,4 +1,4 @@
-# Operazioni per le migrazioni 20261118 (sicurezza), 20261119 (importazione tesserati), 20261120 (foto private) e 20261121 (permessi sulle foto)
+# Operazioni per le migrazioni 20261118 (sicurezza), 20261119 (importazione tesserati), 20261120 (foto private), 20261121 (permessi sulle foto) e 20261122 (correzioni del retest)
 
 Riepilogo completo degli interventi, dello stato della produzione e dei rischi residui:
 [`SICUREZZA_INTERVENTI_2026.md`](../../SICUREZZA_INTERVENTI_2026.md).
@@ -66,6 +66,31 @@ non carica, non modifica e non cancella nulla. Non tocca file né righe: solo re
 | P3 | `07_controlla_policy_foto.sql` | Di nuovo: 4 restrittive per tabella, nessuna riga `NO`, conteggi delle foto invariati | No |
 | P4 | Prove con i 3 account di prova (socio: vede, cancella solo le sue; direttivo/presidente: cancellano tutte) | App | Sì, solo foto di prova |
 | — | `08_rollback_permessi_foto.sql` | Solo in caso di problemi: regole identiche a quelle dopo 20261120 | Sì (solo regole) |
+
+## Correzioni del retest Strix (20261122)
+
+Dal retest Strix del 19/11/2026 (report conservato solo in locale, in `strix_runs/`):
+adesioni di chi è stato riportato "in attesa", tema non valido che blocca l'app,
+SVG nel bucket pubblico. Non tocca file né dati: solo regole, un vincolo e i tipi
+ammessi dal bucket `foto`. Insieme va pubblicata la nuova app (`app.js`, `temi.js`,
+`importa-xls.js`, `index.html`): rifiuta gli SVG, ignora temi e nomi "ereditati"
+(`constructor`...), limita e-mail (254 caratteri) e colonne (100) nell'importazione.
+
+| Passo | File | Cosa fa | Modifica? |
+|---|---|---|---|
+| R1 | `10_controlla_svg.sql` | Tipi ammessi dai bucket, SVG già presenti in `foto` e dove sono usati, tema attuale | No, solo lettura |
+| R2 | `../migrations/20261122_correzioni_retest.sql` | Regole delle adesioni per ruolo (+2 restrittive), vincolo sul tema, `foto` senza SVG. Si ferma se trova regole sconosciute sulle adesioni | Sì (regole, vincolo, tipi del bucket) |
+| R3 | `10_controlla_svg.sql` e `07_controlla_policy_foto.sql` | Controllo dopo: nessun SVG ammesso, regole delle foto invariate | No |
+| R4 | Pubblicare la nuova app | GitHub Pages | Sì |
+| R5 | Prove con gli account di prova: socio vede/modifica/annulla solo le sue iscrizioni; direttivo tutte; account in attesa nessuna; caricare un PNG funziona, un SVG viene rifiutato | App | Solo dati di prova |
+| — | `11_rollback_correzioni_retest.sql` | Solo in caso di problemi: regole, vincolo e tipi del bucket come dopo 20261121 | Sì |
+
+Note:
+* Gli SVG già presenti nel bucket `foto` non vengono toccati: se uno è il logo, caricare
+  prima un logo PNG dall'app; gli altri si valutano a mano (dopo averne salvato una copia).
+* Se il tema salvato non è valido, la migrazione lo segnala e il vincolo vale solo per le
+  nuove scritture: correggere il tema e poi `validate constraint` (comando nel messaggio).
+* Nessuna funzione cambia: le impronte qui sotto restano valide.
 
 ## Impronte attese delle funzioni (controllo "FOTOGRAFIA DELLA STRUTTURA")
 

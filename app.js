@@ -46,6 +46,8 @@ const fmtLongY = iso => { const d = asDate(iso); return d ? d.toLocaleDateString
 const dayN = iso => { const d = asDate(iso); return d ? d.getDate() : "–"; };
 const monS = iso => { const d = asDate(iso); return d ? d.toLocaleDateString("it-IT", {month:"short"}).replace(".", "") : ""; };
 const fmtOra = o => o ? "ore " + o.replace(":", ".") : "";
+// Solo chiavi proprie di un oggetto (mai "constructor", "__proto__"...): non dipende da temi.js
+const chiavePropria = (o, k) => typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k);
 const norm = n => String(n || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z ]/g, " ").split(/\s+/).filter(Boolean).sort().join(" ");
 const soloCifre = t => String(t || "").replace(/\D/g, "").replace(/^0039/, "").replace(/^39(?=3\d{8,9}$)/, "");
 const emailDaTel = t => soloCifre(t) + "@" + DOMINIO_FINTO;
@@ -104,6 +106,8 @@ const api = {
   // Nel bucket pubblico restituisce l'URL pubblico; in quello delle gallerie nessun URL
   // (si leggono solo con URL temporanei firmati).
   async carica(file, riduci = true, bucket = BKT_PUB) {
+    // Niente SVG: un SVG aperto dal suo URL può eseguire codice (anche il bucket li rifiuta)
+    if (eSvg(file)) { const e = new Error("Le immagini SVG non sono ammesse: usa una foto JPG o PNG."); e.codice = "svg"; throw e; }
     const blob = riduci ? await comprimi(file) : file;
     if (!S.live) return {url: URL.createObjectURL(blob), percorso: "", bucket};
     if (!S.myId) throw new Error("Sessione scaduta: rientra nell'app");
@@ -117,6 +121,8 @@ const api = {
   async foto(file, riduci = true) { return (await api.carica(file, riduci, BKT_PUB)).url; },
   async togliFile(percorso, bucket = BKT_PUB) { if (S.live && percorso) { try { await S.sb.storage.from(bucket).remove([percorso]); } catch (e) {} } }
 };
+
+const eSvg = f => /svg/i.test((f && f.type) || "") || /\.svgz?$/i.test((f && f.name) || "");
 
 async function comprimi(file, max = 1600, q = 0.82) {
   if (/svg|gif/.test(file.type)) return file;
@@ -225,10 +231,11 @@ function partecipanti(eid) {
     id: a.id, uid: a.user_id, fonte: a.user_id ? "app" : "man", nome: a.nome, io: a.io !== false,
     acc: a.acc || [], note: a.note || "", canale: a.canale || "App", quando: a.creato_il || ""
   })).sort((a, b) => (a.quando || "").localeCompare(b.quando || ""));
-  const seen = {};
-  out.forEach((p, i) => [...(p.io ? [p.nome] : []), ...p.acc.map(x => x.nome)].forEach(n => { const k = norm(n); if (k) (seen[k] ||= []).push({i, n}); }));
+  // Map e non {}: un nome come "constructor" non deve trovare le proprietà ereditate di Object
+  const seen = new Map();
+  out.forEach((p, i) => [...(p.io ? [p.nome] : []), ...p.acc.map(x => x.nome)].forEach(n => { const k = norm(n); if (k) { if (!seen.has(k)) seen.set(k, []); seen.get(k).push({i, n}); } }));
   out.forEach(p => p.dups = []);
-  Object.values(seen).forEach(arr => { if (arr.length > 1) arr.forEach(({i, n}) => { if (!out[i].dups.includes(n)) out[i].dups.push(n); }); });
+  [...seen.values()].forEach(arr => { if (arr.length > 1) arr.forEach(({i, n}) => { if (!out[i].dups.includes(n)) out[i].dups.push(n); }); });
   return out;
 }
 const persone = p => (p.io ? 1 : 0) + (p.acc || []).length;
@@ -528,7 +535,7 @@ function nomeAnteprima() {
   if (k === "__bozza") return "il tuo tema personalizzato";
   if (k === "automatico") return "Automatico";
   if (k === "personalizzato") return "il tuo tema";
-  return (TEMI[k] || {}).nome || "un nuovo tema";
+  return (chiavePropria(TEMI, k) ? TEMI[k].nome : "") || "un nuovo tema";
 }
 function barraAnteprima() {
   if (!temaAnteprima) return "";
@@ -855,7 +862,7 @@ function bindFoto(riduci = true) {
     const file = $("#imgF").files[0]; if (!file) return;
     $("#imgS").textContent = "Carico la foto…";
     try { fotoNuova = await api.foto(file, riduci); $("#imgP").src = fotoNuova; $("#imgP").hidden = false; $("#imgS").textContent = "Foto pronta."; }
-    catch (e) { $("#imgS").textContent = "Non sono riuscito a caricare la foto. Prova con un'immagine più piccola."; }
+    catch (e) { $("#imgS").textContent = e && e.codice === "svg" ? e.message : "Non sono riuscito a caricare la foto. Prova con un'immagine più piccola."; }
   });
 }
 
@@ -960,7 +967,7 @@ function formConfig() {
 function temaPer(k) {
   if (k === "personalizzato") return daPersonalizzato(cfg().tema_personalizzato || {});
   if (k === "automatico") return TEMI[temaDelGiorno()];
-  return TEMI[k] || TEMI[TEMA_BASE];
+  return chiavePropria(TEMI, k) ? TEMI[k] : TEMI[TEMA_BASE];
 }
 function vTemi() {
   const c = cfg(), scelto = S.temaScelto || c.tema || TEMA_BASE;

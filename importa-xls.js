@@ -11,6 +11,11 @@
 
 const IMPORT_MAX_BYTE = 5 * 1024 * 1024;
 const IMPORT_MAX_RIGHE = 5000;
+// Colonne lette al massimo: il gestionale ne usa poche; una cella lontana (es. colonna XFD)
+// renderebbe ogni riga larga 16384 celle e potrebbe esaurire la memoria del browser.
+const IMPORT_MAX_COLONNE = 100;
+// Un indirizzo e-mail non supera 254 caratteri (RFC 5321): oltre, nessun controllo costoso.
+const EMAIL_MAX = 254;
 
 // Intestazioni riconosciute (dopo normalizzazione), in ordine di preferenza
 const CAMPI_IMPORT = {
@@ -63,7 +68,9 @@ function leggiXls(XLSX, dati) {
       if (r.filter(c => c && c.t === "s" && String(c.v).trim()).length >= 2) { h = i; break; }
     }
     if (h < 0) continue;
-    const larghezza = Math.max(...righe.slice(h).map(r => (r || []).length));
+    let larghezzaFile = 0;
+    for (let i = h; i < righe.length; i++) larghezzaFile = Math.max(larghezzaFile, (righe[i] || []).length);
+    const larghezza = Math.min(larghezzaFile, IMPORT_MAX_COLONNE);
     const intestazioni = Array.from({length: larghezza}, (_, j) => {
       const t = valoreCella((righe[h] || [])[j], isDate).testo.trim();
       return t || "Colonna " + (j + 1);
@@ -74,9 +81,10 @@ function leggiXls(XLSX, dati) {
       if (celle.every(c => c.testo.trim() === "")) continue;
       corpo.push({n: i + 1, celle});
     }
-    return {foglio: nomeFoglio, fogli: wb.SheetNames.slice(), intestazioni, righe: corpo.slice(0, IMPORT_MAX_RIGHE), troncato: corpo.length > IMPORT_MAX_RIGHE};
+    return {foglio: nomeFoglio, fogli: wb.SheetNames.slice(), intestazioni, righe: corpo.slice(0, IMPORT_MAX_RIGHE), troncato: corpo.length > IMPORT_MAX_RIGHE,
+      colonneEscluse: Math.max(0, larghezzaFile - IMPORT_MAX_COLONNE)};
   }
-  return {foglio: "", fogli: wb.SheetNames.slice(), intestazioni: [], righe: [], troncato: false};
+  return {foglio: "", fogli: wb.SheetNames.slice(), intestazioni: [], righe: [], troncato: false, colonneEscluse: 0};
 }
 
 // Quale colonna del file corrisponde a ogni campo (indice o -1)
@@ -104,7 +112,7 @@ function telChiave(t) {
 function telSalvato(t) {
   return String(t ?? "").replace(/\D/g, "").replace(/^0039/, "").replace(/^39(?=3\d{8,9}$)/, "");
 }
-const emailValida = e => /^[^@\s"'<>]+@[^@\s"'<>]+\.[^@\s"'<>]{2,}$/.test(e);
+const emailValida = e => typeof e === "string" && e.length <= EMAIL_MAX && /^[^@\s"'<>]+@[^@\s"'<>]+\.[^@\s"'<>]{2,}$/.test(e);
 
 // Controlla ogni riga del file. Non modifica nulla.
 function preparaRighe(lettura, mappa) {
@@ -201,6 +209,6 @@ function csvReport(esito) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {IMPORT_MAX_BYTE, IMPORT_MAX_RIGHE, CAMPI_IMPORT, ETICHETTE_IMPORT, normIntestazione, valoreCella, leggiXls,
+  module.exports = {IMPORT_MAX_BYTE, IMPORT_MAX_RIGHE, IMPORT_MAX_COLONNE, EMAIL_MAX, emailValida, CAMPI_IMPORT, ETICHETTE_IMPORT, normIntestazione, valoreCella, leggiXls,
     mappaColonne, telChiave, telSalvato, preparaRighe, confrontaAnagrafica, pianoImport, csvReport};
 }

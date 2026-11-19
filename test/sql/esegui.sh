@@ -8,6 +8,8 @@
 #   5. due iscrizioni simultanee agli ultimi posti    → ne deve passare una sola
 #   6. permessi sulle foto per ruolo (20261121): schema in produzione + migrazione,
 #      dati invariati, migrazione rieseguibile, blocco con regole sconosciute, rollback
+#   7. correzioni del retest Strix (20261122): adesioni per ruolo, tema, bucket senza SVG;
+#      stesse verifiche dello scenario 6 sullo schema oggi in produzione (c083fc1)
 # I riferimenti di confronto sono commit fissi (main oggi contiene già le correzioni):
 #   BASE_REF            schema prima di tutte le correzioni di sicurezza
 #   CONFRONTO_REF       schema prima della correzione dei posti
@@ -17,6 +19,7 @@ cd "$(dirname "$0")/../.."
 IMMAGINE="${PG_IMAGE:-postgres:16-alpine}"
 BASE="${BASE_REF:-1951fbe}"
 PRIMA_PERMESSI="${PRIMA_PERMESSI_REF:-055c922}"
+PRIMA_RETEST="${PRIMA_RETEST_REF:-c083fc1}"
 NOME="auser-test-sql-$$"
 TMP="$(mktemp -d)"
 
@@ -37,15 +40,16 @@ scenario() {  # nome file...
 
 echo "== 1. Installazione nuova (supabase/schema.sql)"
 scenario nuovo $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql $T/20_test_accessi.sql $T/25_test_posti.sql \
-  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
+  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/1.txt") PASS, $(grep -c '^FAIL' "$TMP/1.txt" || true) FAIL"
 
 echo "== 2. Database esistente ($BASE) + migrazione"
 scenario migrato $T/00_stub_supabase.sql "$TMP/schema_vecchio.sql" $T/10_dati_prova.sql $T/15_dati_rovinati.sql \
   supabase/migrations/20261118_sicurezza_accessi.sql supabase/migrations/20261119_importa_tesserati.sql \
   supabase/migrations/20261120_foto_private.sql supabase/migrations/20261121_permessi_foto_ruoli.sql \
+  supabase/migrations/20261122_correzioni_retest.sql \
   $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
-  $T/45_test_permessi_foto.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
+  $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/2.txt") PASS, $(grep -c '^FAIL' "$TMP/2.txt" || true) FAIL"
 
 echo "== 3. Controllo: schema di $BASE senza correzioni (qui i FAIL sono attesi)"
@@ -112,8 +116,41 @@ q permessi_prima < $T/45_test_permessi_foto.sql > "$TMP/6b.txt" || true
 echo "     $(grep -c '^PASS' "$TMP/6b.txt" || true) PASS, $(grep -c '^FAIL' "$TMP/6b.txt" || true) FAIL (difetti trovati)"
 grep '^FAIL' "$TMP/6b.txt" | cut -d'|' -f2 | sed 's/^/       - /' || true
 
-if grep -q '^FAIL' "$TMP/1.txt" "$TMP/2.txt" "$TMP/4.txt" "$TMP/5.txt" "$TMP/6.txt" || ! grep -q '^PASS' "$TMP/1.txt" || ! grep -q '^PASS' "$TMP/2.txt" \
-   || ! grep -q '^PASS' "$TMP/4.txt" || ! grep -q '^PASS' "$TMP/5.txt" || ! grep -q '^PASS' "$TMP/6.txt"; then
+echo "== 7. Correzioni del retest Strix: schema in produzione ($PRIMA_RETEST) + 20261122"
+git show "$PRIMA_RETEST:supabase/schema.sql" > "$TMP/schema_retest.sql"
+M7=supabase/migrations/20261122_correzioni_retest.sql
+DATI7="select md5(coalesce((select string_agg(a::text, '|' order by a.id) from public.adesioni a), '') || coalesce((select string_agg(i::text, '|' order by i.id) from public.impostazioni i), '') || coalesce((select string_agg(f::text, '|' order by f.id) from public.foto f), '') || coalesce((select string_agg(o.bucket_id || o.name, '|' order by o.bucket_id, o.name) from storage.objects o), ''))"
+STATO7="select md5(coalesce((select string_agg(concat_ws('|', policyname, permissive, cmd, roles::text, qual, with_check), E'\\n' order by policyname) from pg_policies where schemaname = 'public' and tablename = 'adesioni'), '') || coalesce((select string_agg(conname || pg_get_constraintdef(oid), '|' order by conname) from pg_constraint where conrelid = 'public.impostazioni'::regclass), '') || coalesce((select string_agg(id || array_to_string(allowed_mime_types, ','), '|' order by id) from storage.buckets), ''))"
+{
+  for db in retest retest_prima retest_intrusa; do
+    docker exec "$NOME" createdb -U postgres "$db"
+    cat $T/00_stub_supabase.sql "$TMP/schema_retest.sql" $T/10_dati_prova.sql $T/20_test_accessi.sql $T/40_test_foto_private.sql | q "$db" >/dev/null
+  done
+  echo "insert into storage.objects (bucket_id, name) values ('foto', '00000000-0000-0000-0000-000000000001/vecchio-logo.svg');" | q retest >/dev/null
+  dati_prima=$(echo "$DATI7" | q retest); stato_prima=$(echo "$STATO7" | q retest)
+  qn() { docker exec -i -e PGOPTIONS="-c client_min_messages=notice" "$NOME" psql -U postgres -d "$1" -v ON_ERROR_STOP=1 -q -X -At 2>&1; }
+  out7=$(qn retest < "$M7" && qn retest < "$M7") && echo "PASS|migrazione 20261122: eseguita due volte senza errori" || echo "FAIL|migrazione 20261122: errore: $out7"
+  echo "$out7" | grep -q "1 file SVG già presenti" && echo "PASS|migrazione 20261122: segnala gli SVG già presenti senza toccarli" || echo "FAIL|migrazione 20261122: SVG già presenti non segnalati"
+  esito6 "$dati_prima" "$(echo "$DATI7" | q retest)" "migrazione 20261122: adesioni, impostazioni, foto e file invariati"
+  [ "$stato_prima" != "$(echo "$STATO7" | q retest)" ] && echo "PASS|migrazione 20261122: regole e vincoli cambiati" || echo "FAIL|migrazione 20261122: nulla è cambiato"
+  echo "create policy aggiunta_a_mano on public.adesioni for select to authenticated using (true);" | q retest_intrusa
+  stato_intrusa=$(echo "$STATO7" | q retest_intrusa)
+  out=$(q retest_intrusa < "$M7" || true)
+  echo "$out" | grep -q "Regole sconosciute.*aggiunta_a_mano" && echo "PASS|migrazione 20261122: si ferma e nomina la regola sconosciuta" || echo "FAIL|migrazione 20261122: non si è fermata davanti alla regola sconosciuta"
+  esito6 "$stato_intrusa" "$(echo "$STATO7" | q retest_intrusa)" "migrazione 20261122: fermata, nulla è cambiato"
+  q retest < $T/46_test_correzioni_retest.sql | grep -E '^(PASS|FAIL)'
+  q retest < supabase/operazioni/11_rollback_correzioni_retest.sql >/dev/null
+  esito6 "$stato_prima" "$(echo "$STATO7" | q retest)" "rollback 20261122: regole, vincoli e tipi del bucket identici a prima"
+} > "$TMP/7.txt"
+grep -v '^PASS' "$TMP/7.txt" || true
+echo "   $(grep -c '^PASS' "$TMP/7.txt") PASS, $(grep -c '^FAIL' "$TMP/7.txt" || true) FAIL"
+echo "   controllo: schema in produzione senza 20261122 (qui i FAIL sono attesi)"
+q retest_prima < $T/46_test_correzioni_retest.sql > "$TMP/7b.txt" || true
+echo "     $(grep -c '^PASS' "$TMP/7b.txt" || true) PASS, $(grep -c '^FAIL' "$TMP/7b.txt" || true) FAIL (difetti trovati)"
+grep '^FAIL' "$TMP/7b.txt" | cut -d'|' -f2 | sed 's/^/       - /' || true
+
+if grep -q '^FAIL' "$TMP/1.txt" "$TMP/2.txt" "$TMP/4.txt" "$TMP/5.txt" "$TMP/6.txt" "$TMP/7.txt" || ! grep -q '^PASS' "$TMP/1.txt" || ! grep -q '^PASS' "$TMP/2.txt" \
+   || ! grep -q '^PASS' "$TMP/4.txt" || ! grep -q '^PASS' "$TMP/5.txt" || ! grep -q '^PASS' "$TMP/6.txt" || ! grep -q '^PASS' "$TMP/7.txt"; then
   echo "ESITO: test SQL NON superati"; exit 1
 fi
 echo "ESITO: test SQL superati"

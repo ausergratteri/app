@@ -232,17 +232,26 @@ alter table public.adesioni enable row level security;
 -- Il socio vede solo la propria adesione; direttivo e presidente vedono tutto
 drop policy if exists adesioni_leggi on public.adesioni;
 create policy adesioni_leggi on public.adesioni for select
-  using (user_id = auth.uid() or public.livello() >= 2);
+  using (public.livello() >= 2 or (public.livello() >= 1 and user_id = auth.uid()));
 drop policy if exists adesioni_crea on public.adesioni;
 create policy adesioni_crea on public.adesioni for insert
   with check ((user_id = auth.uid() and public.livello() >= 1 and canale = 'App') or public.livello() >= 2);
 drop policy if exists adesioni_modifica on public.adesioni;
 create policy adesioni_modifica on public.adesioni for update
-  using (user_id = auth.uid() or public.livello() >= 2)
-  with check ((user_id = auth.uid() and canale = 'App') or public.livello() >= 2);
+  using (public.livello() >= 2 or (public.livello() >= 1 and user_id = auth.uid()))
+  with check ((public.livello() >= 1 and user_id = auth.uid() and canale = 'App') or public.livello() >= 2);
 drop policy if exists adesioni_elimina on public.adesioni;
 create policy adesioni_elimina on public.adesioni for delete
-  using (user_id = auth.uid() or public.livello() >= 2);
+  using (public.livello() >= 2 or (public.livello() >= 1 and user_id = auth.uid()));
+-- Regole RESTRITTIVE (in AND con tutte le altre): chi è in attesa non tocca le adesioni,
+-- un socio solo le sue (vedi migrations/20261122_correzioni_retest.sql)
+drop policy if exists adesioni_solo_soci on public.adesioni;
+create policy adesioni_solo_soci on public.adesioni as restrictive for all to anon, authenticated
+  using (public.livello() >= 1) with check (public.livello() >= 1);
+drop policy if exists adesioni_solo_proprie on public.adesioni;
+create policy adesioni_solo_proprie on public.adesioni as restrictive for all to anon, authenticated
+  using (public.livello() >= 2 or user_id = auth.uid())
+  with check (public.livello() >= 2 or user_id = auth.uid());
 
 -- Le regole dell'app valgono anche sul database. Il socio (non il direttivo) può
 -- iscriversi o modificare solo se l'attività esiste ed è aperta, entro la scadenza,
@@ -362,6 +371,11 @@ create table if not exists public.impostazioni (
 insert into public.impostazioni (id) values (1) on conflict (id) do nothing;
 -- Tema grafico scelto dal presidente (vale anche se il database è già stato creato)
 alter table public.impostazioni add column if not exists tema text not null default 'bianco';
+-- Solo i temi che l'app conosce (chiavi di TEMI in temi.js + personalizzato e automatico)
+alter table public.impostazioni drop constraint if exists impostazioni_tema_valido;
+alter table public.impostazioni add constraint impostazioni_tema_valido check (tema in (
+  'bianco', 'classico', 'natale', 'vecchia', 'carnevale', 'pasqua', 'primavera', 'estate',
+  'sangiacomo', 'autunno', 'personalizzato', 'automatico')) not valid;
 alter table public.impostazioni add column if not exists tema_personalizzato jsonb not null default '{}'::jsonb;
 alter table public.impostazioni enable row level security;
 -- Leggibili anche prima dell'accesso, per mostrare logo e colori nella pagina di accesso
@@ -378,7 +392,7 @@ alter table public.impostazioni add constraint impostazioni_link_web
 -- ---------- Foto (logo, gite, bacheca e gallerie degli eventi) ----------
 -- Ogni persona carica nella propria cartella; massimo 5 MB a foto (l'app le riduce prima).
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('foto', 'foto', true, 5242880, array['image/jpeg','image/png','image/webp','image/gif','image/svg+xml'])
+values ('foto', 'foto', true, 5242880, array['image/jpeg','image/png','image/webp','image/gif'])
 on conflict (id) do update set public = true, file_size_limit = excluded.file_size_limit,
   allowed_mime_types = excluded.allowed_mime_types;
 drop policy if exists foto_leggi on storage.objects;
