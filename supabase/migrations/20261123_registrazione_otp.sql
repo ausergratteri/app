@@ -16,6 +16,10 @@
 --     SQL Editor con operazioni/14_nomina_primo_presidente.sql.
 --  I codici e i gettoni non sono mai salvati in chiaro: solo impronte HMAC/SHA-256.
 --  Le funzioni nuove sono eseguibili SOLO dal ruolo service_role (la funzione server).
+--  Completamento (19/11/2026): il gettone si consuma UNA volta con una prenotazione atomica;
+--  un eventuale account "in attesa" senza dati viene sostituito da un account NUOVO (mai
+--  cambiato il PIN di un account esistente); la promozione a socio è atomica e legata alla
+--  prenotazione e all'account appena creato.
 -- =====================================================================
 begin;
 
@@ -42,8 +46,15 @@ create table if not exists registrazione.richieste (
 );
 create index if not exists richieste_per_telefono on registrazione.richieste (telefono, creata_il);
 create index if not exists richieste_per_ip on registrazione.richieste (ip_hash, creata_il);
+alter table registrazione.richieste add column if not exists prenotazione_hash text;  -- SHA-256, mai in chiaro
+alter table registrazione.richieste add column if not exists prenotata_il timestamptz;
 alter table registrazione.richieste enable row level security;   -- nessuna regola: nessun accesso via API
 revoke all on registrazione.richieste from public, anon, authenticated;
+
+-- Funzioni sostituite dalla prenotazione/conferma (19/11/2026): rimosse se presenti
+drop function if exists public.registrazione_gettone(uuid, text);
+drop function if exists public.registrazione_riprendi(uuid, text, uuid);
+drop function if exists registrazione.consuma(uuid, text, text);
 
 -- ---------- 2. Nome e cognome devono corrispondere alla voce dell'anagrafica ----------
 -- Ogni parola scritta (nome e cognome, senza accenti e maiuscole) deve comparire nel
@@ -142,74 +153,100 @@ begin
   return query select 'ok', nuovo, max_tentativi - r.tentativi - 1;
 end $$;
 
--- ---------- 5. Gettone ancora valido? (non lo consuma) ----------
--- Serve alla funzione server prima di creare l'account. Restituisce il telefono della
--- richiesta, perché l'indirizzo di accesso si ricava da lì e non da ciò che manda il client.
-create or replace function public.registrazione_gettone(p_richiesta uuid, p_token text)
-returns table (esito text, telefono text, nome text, account_in_attesa uuid)
-language plpgsql security definer set search_path = public, extensions as $$
-declare r registrazione.richieste; t public.tesserati; attesa uuid;
-begin
-  select * into r from registrazione.richieste where id = p_richiesta and tipo = 'otp';
-  if not found or r.verificata_il is null or r.usata_il is not null or r.token_hash is null
-     or now() > r.token_scade_il or r.tesserato_id is null
-     or r.token_hash <> encode(extensions.digest(coalesce(p_token, ''), 'sha256'), 'hex') then
-    return query select 'non_valido', null::text, null::text, null::uuid; return;
-  end if;
-  select * into t from public.tesserati where id = r.tesserato_id;
-  if not found or public.solo_cifre_tel(t.telefono) <> r.telefono then
-    return query select 'non_valido', null::text, null::text, null::uuid; return;
-  end if;
-  if exists (select 1 from public.profili p where public.solo_cifre_tel(p.telefono) = r.telefono and p.ruolo <> 'in_attesa') then
-    return query select 'gia_registrato', null::text, null::text, null::uuid; return;
-  end if;
-  select p.id into attesa from public.profili p where public.solo_cifre_tel(p.telefono) = r.telefono and p.ruolo = 'in_attesa' limit 1;
-  return query select 'ok', r.telefono, t.nome, attesa;
-end $$;
+-- ---------- 5. Prenotazione: consuma il gettone UNA volta ----------
+-- FOR UPDATE mette in fila le richieste simultanee: la seconda trova token_hash già cancellato.
+-- Qui non si tocca nessun account. Restituisce il telefono della richiesta (l'indirizzo di
+-- accesso si ricava da lì, non da ciò che manda il client) e una prenotazione casuale valida
+-- 2 minuti, di cui il database conserva solo l'impronta. Un account "in attesa" con dati propri
+-- (ex socio riportato in attesa) non viene mai toccato: serve il direttivo.
+create or replace function registrazione.ha_dati(u uuid) returns boolean
+language sql stable security definer set search_path = public, storage as $$
+  select exists (select 1 from public.adesioni where user_id = u)
+      or exists (select 1 from public.foto where user_id = u)
+      or exists (select 1 from public.importazioni where eseguita_da = u)
+      or exists (select 1 from storage.objects o
+                  where o.owner = u or o.owner_id = u::text
+                     or (o.bucket_id in ('foto', 'foto-private') and (storage.foldername(o.name))[1] = u::text));
+$$;
+revoke execute on function registrazione.ha_dati(uuid) from public, anon, authenticated;
 
--- ---------- 6. Consumo del gettone (usato dal trigger e per riprendere un account in attesa) ----------
--- Unico punto in cui una registrazione diventa "socio". Controlla tutto di nuovo, in modo
--- atomico, e segna la richiesta come usata: un secondo uso non è possibile.
-create or replace function registrazione.consuma(p_richiesta uuid, p_token_hash text, p_telefono text)
-returns uuid language plpgsql security definer set search_path = public, extensions as $$
-declare r registrazione.richieste;
+create or replace function public.registrazione_prenota(p_richiesta uuid, p_token_hash text)
+returns table (esito text, prenotazione text, telefono text, nome text, account_in_attesa uuid)
+language plpgsql security definer set search_path = public, extensions as $$
+declare r registrazione.richieste; t public.tesserati; attesa uuid; pren text;
 begin
   select * into r from registrazione.richieste where id = p_richiesta and tipo = 'otp' for update;
   if not found or r.verificata_il is null or r.usata_il is not null or r.token_hash is null
      or now() > r.token_scade_il or r.tesserato_id is null
-     or r.token_hash <> coalesce(p_token_hash, '') or r.telefono <> coalesce(p_telefono, '') then
-    return null;
+     or coalesce(p_token_hash, '') !~ '^[0-9a-f]{64}$' or r.token_hash <> p_token_hash then
+    return query select 'non_valido', null::text, null::text, null::text, null::uuid; return;
   end if;
-  if not exists (select 1 from public.tesserati t where t.id = r.tesserato_id and public.solo_cifre_tel(t.telefono) = r.telefono) then
-    return null;
+  update registrazione.richieste set token_hash = null where id = r.id;   -- consumato da qui
+  select * into t from public.tesserati where id = r.tesserato_id;
+  if not found or public.solo_cifre_tel(t.telefono) <> r.telefono then
+    return query select 'non_valido', null::text, null::text, null::text, null::uuid; return;
   end if;
-  update registrazione.richieste set usata_il = now(), token_hash = null where id = r.id;
-  return r.tesserato_id;
+  if exists (select 1 from public.profili p where public.solo_cifre_tel(p.telefono) = r.telefono and p.ruolo <> 'in_attesa') then
+    return query select 'gia_registrato', null::text, null::text, null::text, null::uuid; return;
+  end if;
+  select p.id into attesa from public.profili p
+   where public.solo_cifre_tel(p.telefono) = r.telefono and p.ruolo = 'in_attesa' limit 1;
+  if attesa is not null and registrazione.ha_dati(attesa) then
+    return query select 'serve_direttivo', null::text, null::text, null::text, null::uuid; return;
+  end if;
+  pren := encode(extensions.gen_random_bytes(32), 'hex');
+  update registrazione.richieste
+     set prenotazione_hash = encode(extensions.digest(pren, 'sha256'), 'hex'), prenotata_il = now()
+   where id = r.id;
+  return query select 'ok', pren, r.telefono, left(t.nome, 80), attesa;
 end $$;
-revoke execute on function registrazione.consuma(uuid, text, text) from public, anon, authenticated;
 
--- ---------- 7. Riprendere un account "in attesa" con lo stesso numero ----------
--- Chi ha verificato l'e-mail dell'anagrafica prova di essere quel tesserato: un account
--- "in attesa" creato con il suo numero (anche da altri) diventa suo. La funzione server
--- ha già cambiato il PIN; qui si promuove a socio e si chiudono le sessioni aperte.
--- Gli account socio, direttivo e presidente NON si possono mai riprendere così.
-create or replace function public.registrazione_riprendi(p_richiesta uuid, p_token text, p_utente uuid)
+-- ---------- 6. Eliminazione dell'account "in attesa" da sostituire ----------
+-- Solo se, nella stessa transazione, la prenotazione è valida, l'account è ancora "in attesa"
+-- (FOR UPDATE: un'approvazione simultanea del direttivo vince) e non ha dati. Il PIN di un
+-- account esistente non viene mai cambiato: si crea un account NUOVO, così le vecchie sessioni
+-- e i vecchi token (legati al vecchio id) non diventano mai "socio". Sessioni e token di
+-- rinnovo si cancellano a cascata.
+create or replace function public.registrazione_elimina_attesa(p_richiesta uuid, p_prenotazione text, p_utente uuid)
 returns text language plpgsql security definer set search_path = public, extensions as $$
-declare tel text; ts uuid; nome_ts text;
+declare r registrazione.richieste;
 begin
-  select public.solo_cifre_tel(p.telefono) into tel from public.profili p where p.id = p_utente and p.ruolo = 'in_attesa';
-  if tel is null or tel = '' then return 'non_valido'; end if;
-  ts := registrazione.consuma(p_richiesta, encode(extensions.digest(coalesce(p_token, ''), 'sha256'), 'hex'), tel);
-  if ts is null then return 'non_valido'; end if;
-  select left(t.nome, 80) into nome_ts from public.tesserati t where t.id = ts;
+  select * into r from registrazione.richieste where id = p_richiesta and tipo = 'otp' for update;
+  if not found or r.usata_il is not null or r.prenotazione_hash is null
+     or now() > r.prenotata_il + interval '2 minutes'
+     or r.prenotazione_hash <> encode(extensions.digest(coalesce(p_prenotazione, ''), 'sha256'), 'hex') then
+    return 'non_valido';
+  end if;
+  perform 1 from public.profili p
+    where p.id = p_utente and p.ruolo = 'in_attesa' and public.solo_cifre_tel(p.telefono) = r.telefono
+    for update;
+  if not found then return 'non_valido'; end if;
+  if registrazione.ha_dati(p_utente) then return 'serve_direttivo'; end if;
+  delete from auth.users where id = p_utente;
+  return 'ok';
+end $$;
+
+-- ---------- 7. Conferma: unico punto in cui una registrazione OTP diventa "socio" ----------
+-- Promuove SOLO l'account creato DOPO la prenotazione, una volta sola (FOR UPDATE).
+create or replace function public.registrazione_conferma(p_richiesta uuid, p_prenotazione text, p_utente uuid)
+returns text language plpgsql security definer set search_path = public, extensions as $$
+declare r registrazione.richieste; tel text; creato timestamptz; nome_ts text;
+begin
+  select * into r from registrazione.richieste where id = p_richiesta and tipo = 'otp' for update;
+  if not found or r.usata_il is not null or r.prenotazione_hash is null
+     or now() > r.prenotata_il + interval '2 minutes'
+     or r.prenotazione_hash <> encode(extensions.digest(coalesce(p_prenotazione, ''), 'sha256'), 'hex') then
+    return 'non_valido';
+  end if;
+  select public.solo_cifre_tel(p.telefono), u.created_at into tel, creato
+    from public.profili p join auth.users u on u.id = p.id
+   where p.id = p_utente and p.ruolo = 'in_attesa' for update of p;
+  if tel is null or tel <> r.telefono or creato < r.prenotata_il then return 'non_valido'; end if;
+  select left(t.nome, 80) into nome_ts from public.tesserati t
+   where t.id = r.tesserato_id and public.solo_cifre_tel(t.telefono) = r.telefono;
+  if not found then return 'non_valido'; end if;
+  update registrazione.richieste set usata_il = now(), prenotazione_hash = null where id = r.id;
   update public.profili set ruolo = 'socio', nome = coalesce(nullif(nome_ts, ''), nome) where id = p_utente;
-  begin
-    if to_regclass('auth.sessions') is not null then
-      execute 'delete from auth.sessions where user_id = $1' using p_utente;
-    end if;
-  exception when insufficient_privilege then
-    raise notice 'Sessioni non chiuse: permesso mancante su auth.sessions';
-  end;
   return 'ok';
 end $$;
 
@@ -230,35 +267,23 @@ begin
 end $$;
 
 -- ---------- 9. Nuovo profilo: "socio" solo con la prova OTP ----------
--- app_metadata (raw_app_meta_data) lo può scrivere solo chi usa la chiave service_role
--- (la funzione server): chi si registra da solo con le API di Auth può scrivere solo
--- user_metadata. Anche con app_metadata, la richiesta viene ricontrollata e consumata.
+-- app_metadata non conta più: GoTrue lo scrive DOPO l'inserimento, quindi il trigger non lo
+-- vedrebbe; la promozione avviene solo in registrazione_conferma.
 create or replace function public.nuovo_profilo() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare
   dominio constant text := '@soci.ausergratteri.app';  -- uguale a DOMINIO_FINTO in app.js
   tel text := '';
-  meta jsonb := coalesce(new.raw_app_meta_data, '{}'::jsonb);
-  ruolo_nuovo text := 'in_attesa';
-  ts uuid;
-  nome_ts text;
 begin
   if lower(coalesce(new.email, '')) like '%' || dominio then
     tel := public.solo_cifre_tel(split_part(new.email, '@', 1));
   end if;
-  -- Nessuno diventa presidente o direttivo registrandosi, nemmeno a database vuoto:
-  -- il primo presidente lo nomina l'amministratore dal SQL Editor (operazioni/14).
-  if tel <> '' and meta ? 'registrazione'
-        and coalesce(meta->>'registrazione', '') ~ '^[0-9a-f-]{36}$'
-        and not exists (select 1 from public.profili p where public.solo_cifre_tel(p.telefono) = tel) then
-    ts := registrazione.consuma((meta->>'registrazione')::uuid, meta->>'registrazione_token', tel);
-    if ts is not null then
-      ruolo_nuovo := 'socio';
-      select left(t.nome, 80) into nome_ts from public.tesserati t where t.id = ts;
-    end if;
-  end if;
+  -- Ogni nuovo account nasce "in attesa", anche con app_metadata. Diventa "socio" solo con
+  -- registrazione_conferma (funzione server, dopo il codice OTP) o con l'approvazione del
+  -- direttivo. Nessuno diventa presidente o direttivo registrandosi, nemmeno a database
+  -- vuoto: il primo presidente lo nomina l'amministratore dal SQL Editor (operazioni/14).
   insert into public.profili (id, nome, telefono, ruolo)
-  values (new.id, coalesce(nullif(nome_ts, ''), left(coalesce(new.raw_user_meta_data->>'nome', ''), 80)), tel, ruolo_nuovo);
+  values (new.id, left(coalesce(new.raw_user_meta_data->>'nome', ''), 80), tel, 'in_attesa');
   return new;
 end $$;
 revoke execute on function public.nuovo_profilo() from public, anon, authenticated;
@@ -270,8 +295,9 @@ begin
   foreach f in array array[
     'public.registrazione_avvia(text, text, text, text, text)',
     'public.registrazione_verifica(uuid, text)',
-    'public.registrazione_gettone(uuid, text)',
-    'public.registrazione_riprendi(uuid, text, uuid)',
+    'public.registrazione_prenota(uuid, text)',
+    'public.registrazione_elimina_attesa(uuid, text, uuid)',
+    'public.registrazione_conferma(uuid, text, uuid)',
     'public.registrazione_manuale_consentita(text, text)'] loop
     execute format('revoke execute on function %s from public, anon, authenticated', f);
     if exists (select 1 from pg_roles where rolname = 'service_role') then

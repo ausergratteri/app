@@ -21,7 +21,7 @@ function dipendenze() {
   const d = {
     async rpc(f, a) {   // come supabase-js con la chiave service role: solo funzioni pubbliche
       const arg = Object.entries(a).map(([k, v]) => `${k} => ${q(v)}`).join(", ");
-      const scalare = ["registrazione_riprendi", "registrazione_manuale_consentita"].includes(f);
+      const scalare = ["registrazione_elimina_attesa", "registrazione_conferma", "registrazione_manuale_consentita"].includes(f);
       const sql = scalare ? `select row_to_json(x) from (select public.${f}(${arg}) as ${f}) x;`
                           : `select row_to_json(x) from public.${f}(${arg}) x;`;
       return psql(sql, "service_role").split("\n").filter(Boolean).map(JSON.parse);
@@ -34,11 +34,6 @@ function dipendenze() {
                ${q(JSON.stringify(u.user_metadata || {}))}::jsonb, ${q(JSON.stringify(u.app_metadata || {}))}::jsonb);`);
         return {id};
       } catch { return {errore: "email_exists"}; }
-    },
-    async aggiornaPin(id, pin) {
-      st.pin.push(id);
-      psql(`update auth.users set encrypted_password = ${q("impronta:" + crypto.createHash("sha256").update(pin).digest("hex"))} where id = ${q(id)};`);
-      return {};
     },
     async inviaEmail(m) { st.email.push(m); },
     hmac: async t => crypto.createHmac("sha256", PEPE).update(t).digest("hex"),
@@ -86,9 +81,11 @@ await prova("riuso del gettone dopo la registrazione → nessun secondo account"
   const a = await gestisci({azione: "avvia", nome: "Luca", cognome: "Neri", telefono: "3335551111"}, "198.51.100.2", d); await st.ultimo;
   const v = await gestisci({azione: "verifica", richiesta: a.corpo.richiesta, codice: codiceDa(st.email[0])}, "198.51.100.2", d);
   assert.equal((await gestisci({azione: "completa", richiesta: a.corpo.richiesta, gettone: v.corpo.gettone, pin: "111222"}, "198.51.100.2", d)).corpo.esito, "ok");
-  const di_nuovo = await gestisci({azione: "completa", richiesta: a.corpo.richiesta, gettone: v.corpo.gettone, pin: "333444"}, "198.51.100.2", d);
+  const di_nuovo = await gestisci({azione: "completa", richiesta: a.corpo.richiesta, gettone: v.corpo.gettone, pin: "908172"}, "198.51.100.2", d);
   assert.notEqual(di_nuovo.corpo.esito, "ok");
   assert.equal(psql(`select count(*) from auth.users where email like '3335551111@%';`), "1");
+  assert.equal(psql(`select encrypted_password from auth.users where email like '3335551111@%';`),
+    "impronta:" + crypto.createHash("sha256").update("111222").digest("hex"), "il PIN tentato la seconda volta non sostituisce quello scelto");
 });
 
 await prova("codice sbagliato 5 volte → bloccato, anche con il codice giusto dopo", async () => {
@@ -120,17 +117,33 @@ await prova("aggirare: registrazione diretta con le API di Auth (solo user_metad
   assert.equal(ruolo("3335553333"), "in_attesa");
 });
 
-await prova("account 'in attesa' creato da altri con il numero del tesserato: dopo l'OTP diventa suo (nuovo PIN, socio)", async () => {
+await prova("account 'in attesa' creato da altri con il numero del tesserato: dopo l'OTP viene sostituito da un account NUOVO socio", async () => {
   azzeraLimiti();
   const {d, st} = dipendenze();
-  const prima = psql(`select encrypted_password from auth.users where id = '00000000-0000-0000-0000-000000000004';`);
   const a = await gestisci({azione: "avvia", nome: "Concetta", cognome: "Attesa", telefono: "3333333333"}, "198.51.100.5", d); await st.ultimo;
   assert.equal(st.email[0].a, "concetta@esempio.it");
   const v = await gestisci({azione: "verifica", richiesta: a.corpo.richiesta, codice: codiceDa(st.email[0])}, "198.51.100.5", d);
   const c = await gestisci({azione: "completa", richiesta: a.corpo.richiesta, gettone: v.corpo.gettone, pin: "975310"}, "198.51.100.5", d);
   assert.deepEqual(c.corpo, {esito: "ok"});
+  assert.equal(psql(`select count(*) from auth.users where id = '00000000-0000-0000-0000-000000000004';`), "0", "vecchio account eliminato");
   assert.equal(ruolo("3333333333"), "socio");
-  assert.notEqual(psql(`select encrypted_password from auth.users where id = '00000000-0000-0000-0000-000000000004';`), prima, "PIN cambiato");
+  assert.equal(psql(`select u.encrypted_password from auth.users u join public.profili p on p.id = u.id where p.telefono = '3333333333';`),
+    "impronta:" + crypto.createHash("sha256").update("975310").digest("hex"), "account nuovo con il PIN scelto");
+});
+
+await prova("account 'in attesa' con dati propri (ex socio): nessuna sostituzione, serve il direttivo", async () => {
+  azzeraLimiti();
+  const {d, st} = dipendenze();
+  psql(`insert into public.tesserati (nome, telefono, email) values ('Viola Ada', '3335554444', 'ada@esempio.it');
+        insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000004e1', '3335554444@${DOMINIO}');
+        insert into public.adesioni (attivita_id, user_id, nome) values ((select id from public.attivita limit 1), '00000000-0000-0000-0000-0000000004e1', 'Ada');`);
+  const a = await gestisci({azione: "avvia", nome: "Ada", cognome: "Viola", telefono: "3335554444"}, "198.51.100.9", d); await st.ultimo;
+  const v = await gestisci({azione: "verifica", richiesta: a.corpo.richiesta, codice: codiceDa(st.email[0])}, "198.51.100.9", d);
+  const c = await gestisci({azione: "completa", richiesta: a.corpo.richiesta, gettone: v.corpo.gettone, pin: "864200"}, "198.51.100.9", d);
+  assert.deepEqual(c.corpo, {esito: "non_completabile"});
+  assert.equal(psql(`select count(*) from auth.users where email like '3335554444@%';`), "1");
+  assert.equal(psql(`select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000004e1';`), "in_attesa");
+  assert.equal(psql(`select count(*) from public.adesioni where user_id = '00000000-0000-0000-0000-0000000004e1';`), "1");
 });
 
 await prova("socio già registrato: nessun codice inviato (niente appropriazione dell'account)", async () => {
@@ -167,7 +180,7 @@ await prova("richiesta manuale: account in attesa per il direttivo, anche per un
 await prova("nel database nessun codice, gettone, PIN o IP in chiaro", async () => {
   const dump = psql(`select coalesce(string_agg(r::text, '|'), '') from registrazione.richieste r;`);
   assert.ok(!/198\.51\.100/.test(dump), "nessun indirizzo IP");
-  assert.ok(!/(135790|975310|246802|111222)/.test(dump), "nessun PIN");
+  assert.ok(!/(135790|975310|246802|111222|908172|864200)/.test(dump), "nessun PIN");
   assert.ok(!/[^0-9a-f]\d{6}[^0-9a-f]/.test("|" + dump.replace(/\d{4}-\d{2}-\d{2}[ T][\d:.+]+/g, "") + "|"), "nessun codice di 6 cifre");
 });
 

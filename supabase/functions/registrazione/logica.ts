@@ -7,7 +7,7 @@
 //  Azioni (POST JSON {azione, ...}):
 //   avvia     {nome, cognome, telefono}          → codice all'e-mail dell'ANAGRAFICA, se c'è
 //   verifica  {richiesta, codice}                → gettone monouso per scegliere il PIN
-//   completa  {richiesta, gettone, pin}          → account socio (o ripresa di un account in attesa)
+//   completa  {richiesta, gettone, pin}          → account socio NUOVO (sostituisce un account in attesa senza dati)
 //   manuale   {nome, cognome, telefono, pin}     → account "in attesa" per il direttivo
 //
 //  Regole di sicurezza:
@@ -16,7 +16,8 @@
 //     e l'e-mail parte dopo la risposta (stessi tempi);
 //   * il codice, il gettone e il PIN non vengono mai scritti nei registri;
 //   * al database arrivano solo impronte: HMAC del codice e dell'IP (con un segreto che
-//     resta nella funzione) e SHA-256 del gettone.
+//     resta nella funzione) e SHA-256 del gettone; la prenotazione resta solo nella funzione;
+//   * il PIN di un account esistente non viene mai cambiato da qui.
 // =====================================================================
 
 export const MESSAGGIO_AVVIO =
@@ -28,8 +29,7 @@ export const MESSAGGIO_MANUALE =
 export type Riga = Record<string, unknown>;
 export type Dip = {
   rpc: (funzione: string, argomenti: Record<string, unknown>) => Promise<Riga[]>;
-  creaUtente: (u: {email: string; password: string; app_metadata?: Riga; user_metadata?: Riga}) => Promise<{id?: string; errore?: string}>;
-  aggiornaPin: (id: string, pin: string) => Promise<{errore?: string}>;
+  creaUtente: (u: {email: string; password: string; user_metadata?: Riga}) => Promise<{id?: string; errore?: string}>;
   inviaEmail: (m: {a: string; oggetto: string; testo: string; html: string}) => Promise<void>;
   hmac: (testo: string) => Promise<string>;     // esadecimale, con il segreto della funzione
   sha256: (testo: string) => Promise<string>;   // esadecimale
@@ -55,6 +55,46 @@ export function ipDaIntestazioni(leggi: (nome: string) => string | null): {ip: s
   const xff = (leggi("x-forwarded-for") || "").split(",")[0].trim();
   if (IP_VALIDO.test(xff)) return {ip: xff, fonte: "x-forwarded-for"};
   return {ip: "sconosciuto", fonte: "nessuna"};
+}
+
+// Parametri SMTP dall'ambiente. Senza impostazioni: Gmail, 465, TLS (produzione invariata).
+// SMTP_SICURO="0" esatto = niente TLS e NESSUNA credenziale, ammesso SOLO verso il computer locale
+// o il servizio Mailpit dello stack Supabase locale (container "supabase_inbucket_<progetto>" o
+// "supabase_mailpit_<progetto>"). Confronto esatto: "localhost.esempio.com", "127.0.0.1.nip.io",
+// IP di rete o nomi corti come "mailpit" NON passano, tranne il nome esatto "inbucket" (alias Docker
+// del Mailpit locale: Deno non risolve i nomi con trattini bassi). In più serve SMTP_IP_ATTESO: l'IP esatto del
+// container Mailpit sulla rete Docker di prova (o 127.x / ::1 per il computer locale). Il nome viene
+// risolto prima di connettersi e TUTTI gli indirizzi devono coincidere con quello atteso; la
+// connessione va poi a quell'IP. Altrimenti la configurazione fallisce e nessuna connessione SMTP
+// in chiaro viene tentata. Con TLS SMTP_IP_ATTESO è ignorato.
+const HOST_LOCALI = new Set(["localhost", "127.0.0.1", "::1"]);
+const MAILPIT_DOCKER = /^supabase_(inbucket|mailpit)_[a-z0-9_-]{1,40}$/;
+const MAILPIT_ALIAS = "inbucket";   // confronto esatto, nessun prefisso o suffisso
+// Solo loopback o reti private IPv4 (10/8, 172.16/12, 192.168/16): un IP pubblico non è mai ammesso.
+export function indirizzoLocale(ip: string): boolean {
+  if (ip === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip) && ip.split(".").every(x => Number(x) <= 255)) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m || m.slice(1).some(x => Number(x) > 255)) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+export type ConfigSmtp =
+  | {ok: true; host: string; porta: number; sicuro: true; conAccesso: true}
+  | {ok: true; host: string; porta: number; sicuro: false; conAccesso: false; ipAtteso: string}
+  | {ok: false; errore: "smtp_in_chiaro_non_consentito" | "smtp_ip_atteso_non_valido"};
+export function configSmtp(leggi: (k: string) => string): ConfigSmtp {
+  const host = (leggi("SMTP_HOST") || "").trim().toLowerCase() || "smtp.gmail.com";
+  const p = Number((leggi("SMTP_PORTA") || "").trim());
+  const porta = Number.isInteger(p) && p >= 1 && p <= 65535 ? p : 465;
+  if ((leggi("SMTP_SICURO") || "").trim() !== "0") return {ok: true, host, porta, sicuro: true, conAccesso: true};
+  if (!HOST_LOCALI.has(host) && host !== MAILPIT_ALIAS && !MAILPIT_DOCKER.test(host)) return {ok: false, errore: "smtp_in_chiaro_non_consentito"};
+  const ipAtteso = (leggi("SMTP_IP_ATTESO") || "").trim();
+  if (!indirizzoLocale(ipAtteso)) return {ok: false, errore: "smtp_ip_atteso_non_valido"};
+  return {ok: true, host, porta, sicuro: false, conAccesso: false, ipAtteso};
+}
+// Esito della risoluzione DNS: ammesso solo se c'è almeno un indirizzo e TUTTI sono quello atteso.
+export function verificaIpSmtp(risolti: string[], atteso: string): boolean {
+  return risolti.length > 0 && risolti.every(ip => ip === atteso);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -152,31 +192,33 @@ async function completa(c: Riga, d: Dip): Promise<Risposta> {
   const gettone = typeof c.gettone === "string" && /^[0-9a-f]{64}$/.test(c.gettone) ? c.gettone : null;
   if (!richiesta || !gettone) return NON_VALIDA();
   if (!pinValido(c.pin)) return risposta(400, {esito: "pin_non_valido"});
-  const [g] = await d.rpc("registrazione_gettone", {p_richiesta: richiesta, p_token: gettone});
-  if (!g || g.esito === "non_valido") { d.log("completa", {esito: "non_valido"}); return risposta(400, {esito: "non_valido"}); }
-  if (g.esito === "gia_registrato") { d.log("completa", {esito: "gia_registrato"}); return risposta(409, {esito: "gia_registrato"}); }
-  if (g.esito !== "ok" || typeof g.telefono !== "string" || !/^\d{6,15}$/.test(g.telefono)) return risposta(400, {esito: "non_valido"});
-
+  const fine = (stato: number, esito: string, log = esito) => { d.log("completa", {esito: log}); return risposta(stato, {esito}); };
+  // 1. Prenotazione atomica: il gettone si consuma qui, una volta sola (al database solo l'impronta).
+  const [g] = await d.rpc("registrazione_prenota", {p_richiesta: richiesta, p_token_hash: await d.sha256(gettone)});
+  if (!g || g.esito === "non_valido") return fine(400, "non_valido");
+  if (g.esito === "gia_registrato") return fine(409, "gia_registrato");
+  if (g.esito === "serve_direttivo") return fine(409, "non_completabile", "serve_direttivo");
+  if (g.esito !== "ok" || typeof g.prenotazione !== "string" || !/^[0-9a-f]{64}$/.test(g.prenotazione)
+      || typeof g.telefono !== "string" || !/^\d{6,15}$/.test(g.telefono)) return fine(400, "non_valido");
+  // Da qui il gettone è consumato: ogni errore chiede un nuovo codice e non promuove nessuno.
+  // 2. Un account "in attesa" con lo stesso numero NON viene ripreso (il suo PIN e le sue sessioni
+  //    potrebbero essere di altri): il database lo elimina solo se è ancora in attesa e senza dati.
   if (typeof g.account_in_attesa === "string" && UUID.test(g.account_in_attesa)) {
-    // Account "in attesa" con lo stesso numero: prima il NUOVO PIN, poi la promozione.
-    // Se la promozione fallisce, l'account resta in attesa ma con il PIN di chi ha verificato.
-    const p = await d.aggiornaPin(g.account_in_attesa, c.pin);
-    if (p.errore) { d.log("completa", {esito: "pin_non_aggiornato"}); return risposta(500, {esito: "errore"}); }
-    const [r] = await d.rpc("registrazione_riprendi", {p_richiesta: richiesta, p_token: gettone, p_utente: g.account_in_attesa});
-    const esito = String(Object.values(r || {})[0] || "non_valido");
-    d.log("completa", {esito: esito === "ok" ? "ripreso" : "non_valido"});
-    return esito === "ok" ? risposta(200, {esito: "ok"}) : risposta(400, {esito: "non_valido"});
+    const [e] = await d.rpc("registrazione_elimina_attesa", {p_richiesta: richiesta, p_prenotazione: g.prenotazione, p_utente: g.account_in_attesa});
+    const ee = String(Object.values(e || {})[0] || "non_valido");
+    if (ee === "serve_direttivo") return fine(409, "non_completabile", "serve_direttivo");
+    if (ee !== "ok") return fine(409, "non_completabile", "attesa_non_eliminato");
   }
-
+  // 3. Account NUOVO con il PIN scelto: il database lo crea "in attesa" (nessun app_metadata).
   const u = await d.creaUtente({
     email: `${soloCifre(g.telefono)}@${d.dominio}`,     // dal database (come lo calcola l'app all'accesso), non dal client
     password: c.pin,
-    app_metadata: {registrazione: richiesta, registrazione_token: await d.sha256(gettone)},
     user_metadata: {nome: String(g.nome || "").slice(0, 80)}
   });
-  if (u.errore || !u.id) { d.log("completa", {esito: "non_completabile"}); return risposta(409, {esito: "non_completabile"}); }
-  d.log("completa", {esito: "creato"});
-  return risposta(200, {esito: "ok"});
+  if (u.errore || !u.id) return fine(409, "non_completabile");
+  // 4. Conferma atomica: promuove SOLO questo account, creato dopo la prenotazione, una volta sola.
+  const [r] = await d.rpc("registrazione_conferma", {p_richiesta: richiesta, p_prenotazione: g.prenotazione, p_utente: u.id});
+  return String(Object.values(r || {})[0] || "") === "ok" ? fine(200, "ok", "creato") : fine(400, "non_valido", "creato_in_attesa");
 }
 
 async function manuale(c: Riga, ip: string, d: Dip): Promise<Risposta> {

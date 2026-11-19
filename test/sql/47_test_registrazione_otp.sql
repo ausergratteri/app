@@ -1,8 +1,9 @@
 -- Registrazione con codice OTP via e-mail (migrazione 20261123_registrazione_otp.sql).
 -- Va eseguito dopo 20_test_accessi.sql (riusa t.esiti). Ogni prova è annullata alla fine.
 -- La funzione server calcola l'HMAC del codice: qui lo simula t.h() (SHA-256 del codice).
--- "Creare l'account" come fa la funzione server (API admin) = insert in auth.users
--- con raw_app_meta_data; chi si registra da solo può scrivere solo raw_user_meta_data.
+-- Completamento come la funzione server: prenotazione (consuma il gettone una volta) →
+-- eventuale eliminazione dell'account "in attesa" senza dati → account NUOVO (insert in
+-- auth.users, nasce "in attesa") → conferma. I metadati dell'account non contano più.
 truncate t.esiti;
 do $$ begin perform set_config('request.jwt.claim.sub', '', false); end $$;
 
@@ -47,8 +48,16 @@ call t.caso('permessi: anon e utenti non eseguono le funzioni di registrazione; 
     not has_function_privilege('anon', 'public.registrazione_avvia(text,text,text,text,text)', 'execute')
     and not has_function_privilege('authenticated', 'public.registrazione_avvia(text,text,text,text,text)', 'execute')
     and not has_function_privilege('authenticated', 'public.registrazione_verifica(uuid,text)', 'execute')
-    and not has_function_privilege('authenticated', 'public.registrazione_gettone(uuid,text)', 'execute')
-    and not has_function_privilege('authenticated', 'public.registrazione_riprendi(uuid,text,uuid)', 'execute')
+    and not has_function_privilege('authenticated', 'public.registrazione_prenota(uuid,text)', 'execute')
+    and not has_function_privilege('anon', 'public.registrazione_prenota(uuid,text)', 'execute')
+    and not has_function_privilege('authenticated', 'public.registrazione_elimina_attesa(uuid,text,uuid)', 'execute')
+    and not has_function_privilege('anon', 'public.registrazione_elimina_attesa(uuid,text,uuid)', 'execute')
+    and not has_function_privilege('authenticated', 'public.registrazione_conferma(uuid,text,uuid)', 'execute')
+    and not has_function_privilege('anon', 'public.registrazione_conferma(uuid,text,uuid)', 'execute')
+    and not has_function_privilege('authenticated', 'registrazione.ha_dati(uuid)', 'execute')
+    and has_function_privilege('service_role', 'public.registrazione_prenota(uuid,text)', 'execute')
+    and has_function_privilege('service_role', 'public.registrazione_elimina_attesa(uuid,text,uuid)', 'execute')
+    and has_function_privilege('service_role', 'public.registrazione_conferma(uuid,text,uuid)', 'execute')
     and not has_function_privilege('anon', 'public.registrazione_manuale_consentita(text,text)', 'execute')
     and has_function_privilege('service_role', 'public.registrazione_avvia(text,text,text,text,text)', 'execute')
     and has_function_privilege('service_role', 'public.registrazione_verifica(uuid,text)', 'execute')
@@ -151,101 +160,188 @@ call t.caso('verifica: una nuova richiesta annulla il codice precedente', $c$
 call t.caso('verifica: richiesta inesistente → non valida', $c$
   select t.vale(esito = 'non_valido') from public.registrazione_verifica(gen_random_uuid(), t.h('111111'))$c$);
 
--- ---------- Gettone e creazione dell'account (come la funzione server) ----------
--- Prepara: avvio + verifica per Giovanni, gettone in t.g
-create procedure t.verificato(tel text, nome text, cognome text) language plpgsql as $$
+-- ---------- Completamento: prenotazione → (eliminazione account in attesa) → account NUOVO → conferma ----------
+-- Ogni funzione che modifica si chiama in un comando e i suoi effetti si controllano nel comando
+-- SUCCESSIVO (update esito_caso ...): dentro uno stesso comando le sotto-interrogazioni non vedono
+-- le modifiche fatte dalle funzioni chiamate.
+create procedure t.verificato(tel text, nome text, cognome text) language plpgsql as $$   -- percorso vero: avvio + verifica
 declare r uuid; tok text;
 begin
   select richiesta into r from t.avvia(nome, cognome, tel, '777777');
   select token into tok from public.registrazione_verifica(r, t.h('777777'));
   perform set_config('t.r', r::text, true); perform set_config('t.g', tok, true);
 end $$;
+create procedure t.verificata(tel text) language plpgsql as $$   -- richiesta già verificata, senza i limiti dell'avvio
+declare r uuid; tok text := encode(extensions.gen_random_bytes(32), 'hex');
+begin
+  insert into registrazione.richieste (tipo, telefono, tesserato_id, verificata_il, token_hash, token_scade_il, ip_hash)
+  select 'otp', tel, x.id, now(), t.h(tok), now() + interval '15 minutes', 'prova'
+    from public.tesserati x where public.solo_cifre_tel(x.telefono) = tel limit 1 returning id into r;
+  perform set_config('t.r', r::text, true); perform set_config('t.g', tok, true); perform set_config('t.p', '', true);
+end $$;
+create function t.prenota(gettone text default null) returns text language plpgsql as $$   -- prenotazione in t.p
+declare e text; p text;
+begin
+  select x.esito, x.prenotazione into e, p
+    from public.registrazione_prenota(current_setting('t.r')::uuid, t.h(coalesce(gettone, current_setting('t.g')))) x;
+  perform set_config('t.p', coalesce(p, ''), true); return e;
+end $$;
+create function t.elimina(u uuid) returns text language sql as $$
+  select public.registrazione_elimina_attesa(current_setting('t.r')::uuid, current_setting('t.p'), u) $$;
+create function t.conferma(u uuid) returns text language sql as $$
+  select public.registrazione_conferma(current_setting('t.r')::uuid, current_setting('t.p'), u) $$;
+create function t.account(u uuid, tel text, creato timestamptz default now()) returns void language sql as $$
+  insert into auth.users (id, email, created_at) values (u, tel || '@soci.ausergratteri.app', creato) $$;
+-- Account "in attesa" SENZA dati, dedicato al caso (i dati di prova possono dare dati a …0004)
+create procedure t.attesa(u uuid, tel text) language plpgsql as $$
+begin
+  insert into public.tesserati (nome, telefono, email) values ('Prova Attesa ' || right(tel, 4), tel, '');
+  insert into auth.users (id, email, created_at) values (u, tel || '@soci.ausergratteri.app', now() - interval '1 minute');
+end $$;
 
-call t.caso('gettone: valido → restituisce il telefono della richiesta e il nome dell''anagrafica', $c$
+-- Prenotazione
+call t.caso('prenota: gettone vero (da verifica) → ok, telefono e nome dall''anagrafica; gettone consumato, prenotazione solo come impronta', $c$
+  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
+  select t.vale(t.prenota() = 'ok');
+  update esito_caso set ok = ok and current_setting('t.p') ~ '^[0-9a-f]{64}$'
+    and (select token_hash is null and prenotazione_hash = t.h(current_setting('t.p')) and prenotata_il is not null
+         from registrazione.richieste where id = current_setting('t.r')::uuid)
+    and not exists (select 1 from registrazione.richieste r where r::text like '%' || current_setting('t.p') || '%')$c$);
+call t.caso('prenota: restituisce telefono e nome, nessun account in attesa', $c$
   call t.verificato('3334444444', 'Giovanni', 'Bianchi');
   select t.vale(esito = 'ok' and telefono = '3334444444' and nome = 'Giovanni Bianchi' and account_in_attesa is null)
-  from public.registrazione_gettone(current_setting('t.r')::uuid, current_setting('t.g'))$c$);
-call t.caso('gettone: sbagliato o scaduto → non valido', $c$
-  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  select t.vale((select esito from public.registrazione_gettone(current_setting('t.r')::uuid, repeat('0', 64))) = 'non_valido');
+  from public.registrazione_prenota(current_setting('t.r')::uuid, t.h(current_setting('t.g')))$c$);
+call t.caso('prenota: una seconda volta con lo stesso gettone → non valido', $c$
+  call t.verificata('3334444444');
+  select t.prenota();
+  select t.vale(t.prenota() = 'non_valido')$c$);
+call t.caso('prenota: gettone sbagliato o malformato → non valido, il gettone vero resta utilizzabile', $c$
+  call t.verificata('3334444444');
+  select t.vale(t.prenota(repeat('0', 64)) = 'non_valido');
+  update esito_caso set ok = ok and (select esito from public.registrazione_prenota(current_setting('t.r')::uuid, 'non-esadecimale')) = 'non_valido';
+  update esito_caso set ok = ok and t.prenota() = 'ok'$c$);
+call t.caso('prenota: gettone scaduto o richiesta non verificata → non valido', $c$
+  call t.verificata('3334444444');
   update registrazione.richieste set token_scade_il = now() - interval '1 second' where id = current_setting('t.r')::uuid;
-  update esito_caso set ok = ok and (select esito from public.registrazione_gettone(current_setting('t.r')::uuid, current_setting('t.g'))) = 'non_valido'$c$);
-call t.caso('account: con la prova OTP il nuovo account diventa socio, con il nome dell''anagrafica', $c$
-  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000471',
-    '3334444444@soci.ausergratteri.app', '{"nome":"Nome a caso"}',
-    jsonb_build_object('registrazione', current_setting('t.r'), 'registrazione_token', t.h(current_setting('t.g'))));
-  select t.vale(ruolo = 'socio' and nome = 'Giovanni Bianchi' and telefono = '3334444444', ruolo)
-  from public.profili where id = '00000000-0000-0000-0000-000000000471';
-  update esito_caso set ok = ok and (select usata_il is not null from registrazione.richieste where id = current_setting('t.r')::uuid)$c$);
-call t.caso('aggirare: registrazione diretta di un tesserato (solo user_metadata) → in attesa', $c$
-  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  insert into auth.users (id, email, raw_user_meta_data) values ('00000000-0000-0000-0000-000000000472', '3334444444@soci.ausergratteri.app',
-    jsonb_build_object('nome', 'Giovanni', 'registrazione', current_setting('t.r'), 'registrazione_token', t.h(current_setting('t.g'))));
-  select t.vale(ruolo = 'in_attesa', ruolo) from public.profili where id = '00000000-0000-0000-0000-000000000472'$c$);
-call t.caso('aggirare: gettone sbagliato nei metadati → in attesa', $c$
-  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000473', '3334444444@soci.ausergratteri.app',
-    jsonb_build_object('registrazione', current_setting('t.r'), 'registrazione_token', repeat('0', 64)));
-  select t.vale(ruolo = 'in_attesa') from public.profili where id = '00000000-0000-0000-0000-000000000473'$c$);
-call t.caso('aggirare: richiesta non verificata (senza codice) → in attesa', $c$
+  select t.vale(t.prenota() = 'non_valido');
   create temp table r1 on commit drop as select richiesta from t.avvia('Giovanni', 'Bianchi', '3334444444', '111111');
-  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000474', '3334444444@soci.ausergratteri.app',
-    jsonb_build_object('registrazione', (select richiesta from r1)::text, 'registrazione_token', t.h('qualsiasi')));
-  select t.vale(ruolo = 'in_attesa') from public.profili where id = '00000000-0000-0000-0000-000000000474'$c$);
-call t.caso('aggirare: gettone scaduto → in attesa', $c$
+  update esito_caso set ok = ok and (select esito from public.registrazione_prenota((select richiesta from r1), t.h('qualsiasi'))) = 'non_valido'$c$);
+call t.caso('prenota: numero di un socio già registrato → gia_registrato', $c$
+  call t.verificata('3331111111');
+  select t.vale(t.prenota() = 'gia_registrato')$c$);
+call t.caso('prenota: account in attesa con adesione, riga foto o file → serve_direttivo (nulla viene toccato)', $c$
+  call t.attesa('00000000-0000-0000-0000-0000000004a1', '3336661001');
+  insert into public.adesioni (attivita_id, user_id, nome) values ((select id from public.attivita limit 1), '00000000-0000-0000-0000-0000000004a1', 'Prova');
+  call t.verificata('3336661001'); select t.vale(t.prenota() = 'serve_direttivo');
+  delete from public.adesioni where user_id = '00000000-0000-0000-0000-0000000004a1';
+  insert into public.foto (attivita_id, user_id, url) values ((select id from public.attivita limit 1), '00000000-0000-0000-0000-0000000004a1', 'x');
+  call t.verificata('3336661001'); update esito_caso set ok = ok and t.prenota() = 'serve_direttivo';
+  delete from public.foto where user_id = '00000000-0000-0000-0000-0000000004a1';
+  insert into storage.objects (bucket_id, name) values ('foto-private', '00000000-0000-0000-0000-0000000004a1/a.png');
+  call t.verificata('3336661001'); update esito_caso set ok = ok and t.prenota() = 'serve_direttivo';
+  delete from storage.objects where name = '00000000-0000-0000-0000-0000000004a1/a.png';
+  insert into storage.objects (bucket_id, name, owner_id) values ('altro', 'b.png', '00000000-0000-0000-0000-0000000004a1');
+  call t.verificata('3336661001'); update esito_caso set ok = ok and t.prenota() = 'serve_direttivo';
+  update esito_caso set ok = ok and exists (select 1 from auth.users where id = '00000000-0000-0000-0000-0000000004a1')$c$);
+
+-- Eliminazione dell'account in attesa
+call t.caso('elimina: account in attesa senza dati → eliminato con le sue sessioni', $c$
+  call t.attesa('00000000-0000-0000-0000-0000000004a2', '3336661002');
+  insert into auth.sessions (user_id) values ('00000000-0000-0000-0000-0000000004a2');
+  call t.verificata('3336661002');
+  select t.vale(t.prenota() = 'ok');
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-0000000004a2') = 'ok';
+  update esito_caso set ok = ok
+    and not exists (select 1 from auth.users where id = '00000000-0000-0000-0000-0000000004a2')
+    and not exists (select 1 from public.profili where id = '00000000-0000-0000-0000-0000000004a2')
+    and not exists (select 1 from auth.sessions where user_id = '00000000-0000-0000-0000-0000000004a2')$c$);
+call t.caso('elimina: mai un socio, direttivo, presidente o un account di un altro numero', $c$
+  call t.attesa('00000000-0000-0000-0000-0000000004a3', '3336661003');
+  insert into auth.users (id, email) values ('00000000-0000-0000-0000-000000000482', '3338887777@soci.ausergratteri.app');
+  call t.verificata('3336661003');
+  select t.vale(t.prenota() = 'ok');
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-000000000003') = 'non_valido';
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-000000000002') = 'non_valido';
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-000000000001') = 'non_valido';
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-000000000482') = 'non_valido';
+  update esito_caso set ok = ok and (select count(*) from auth.users where id in ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002',
+         '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000482')) = 4$c$);
+call t.caso('elimina: prenotazione sbagliata o scaduta → non valido, account intatto', $c$
+  call t.attesa('00000000-0000-0000-0000-0000000004a4', '3336661004');
+  call t.verificata('3336661004');
+  select t.vale(t.prenota() = 'ok');
+  update esito_caso set ok = ok and public.registrazione_elimina_attesa(current_setting('t.r')::uuid, repeat('0', 64), '00000000-0000-0000-0000-0000000004a4') = 'non_valido';
+  update registrazione.richieste set prenotata_il = now() - interval '3 minutes' where id = current_setting('t.r')::uuid;
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-0000000004a4') = 'non_valido';
+  update esito_caso set ok = ok and exists (select 1 from auth.users where id = '00000000-0000-0000-0000-0000000004a4')$c$);
+call t.caso('elimina: dati comparsi dopo la prenotazione → serve_direttivo, account e dati intatti', $c$
+  call t.attesa('00000000-0000-0000-0000-0000000004a5', '3336661005');
+  call t.verificata('3336661005');
+  select t.vale(t.prenota() = 'ok');
+  insert into public.adesioni (attivita_id, user_id, nome) values ((select id from public.attivita limit 1), '00000000-0000-0000-0000-0000000004a5', 'Prova');
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-0000000004a5') = 'serve_direttivo';
+  update esito_caso set ok = ok
+    and exists (select 1 from auth.users where id = '00000000-0000-0000-0000-0000000004a5')
+    and exists (select 1 from public.adesioni where user_id = '00000000-0000-0000-0000-0000000004a5')$c$);
+
+-- Conferma
+call t.caso('conferma: account NUOVO creato dopo la prenotazione → socio, nome dell''anagrafica; richiesta usata', $c$
   call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  update registrazione.richieste set token_scade_il = now() - interval '1 second' where id = current_setting('t.r')::uuid;
-  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000475', '3334444444@soci.ausergratteri.app',
+  select t.vale(t.prenota() = 'ok');
+  select t.account('00000000-0000-0000-0000-000000000471', '3334444444');
+  update esito_caso set ok = ok and t.conferma('00000000-0000-0000-0000-000000000471') = 'ok';
+  update esito_caso set ok = ok
+    and (select ruolo = 'socio' and nome = 'Giovanni Bianchi' from public.profili where id = '00000000-0000-0000-0000-000000000471')
+    and (select usata_il is not null and prenotazione_hash is null and token_hash is null from registrazione.richieste where id = current_setting('t.r')::uuid)$c$);
+call t.caso('conferma: una seconda volta → non valido', $c$
+  call t.verificata('3334444444'); select t.prenota();
+  select t.account('00000000-0000-0000-0000-000000000471', '3334444444'); select t.conferma('00000000-0000-0000-0000-000000000471');
+  update public.profili set ruolo = 'in_attesa' where id = '00000000-0000-0000-0000-000000000471';
+  select t.vale(t.conferma('00000000-0000-0000-0000-000000000471') = 'non_valido')$c$);
+call t.caso('conferma: account creato PRIMA della prenotazione (vecchio PIN, vecchie sessioni) → non valido, resta in attesa', $c$
+  select t.account('00000000-0000-0000-0000-000000000472', '3334444444', now() - interval '1 minute');
+  call t.verificata('3334444444');
+  select t.vale(t.prenota() = 'ok');
+  update esito_caso set ok = ok and t.conferma('00000000-0000-0000-0000-000000000472') = 'non_valido';
+  update esito_caso set ok = ok and (select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000472') = 'in_attesa'$c$);
+call t.caso('conferma: prenotazione sbagliata o scaduta, account di un altro numero o già socio → non valido', $c$
+  call t.verificata('3334444444');
+  select t.vale(t.prenota() = 'ok');
+  select t.account('00000000-0000-0000-0000-000000000473', '3334444444');
+  select t.account('00000000-0000-0000-0000-000000000474', '3338887777');
+  update esito_caso set ok = ok and public.registrazione_conferma(current_setting('t.r')::uuid, repeat('0', 64), '00000000-0000-0000-0000-000000000473') = 'non_valido';
+  update esito_caso set ok = ok and t.conferma('00000000-0000-0000-0000-000000000474') = 'non_valido';
+  update esito_caso set ok = ok and t.conferma('00000000-0000-0000-0000-000000000003') = 'non_valido';
+  update registrazione.richieste set prenotata_il = now() - interval '3 minutes' where id = current_setting('t.r')::uuid;
+  update esito_caso set ok = ok and t.conferma('00000000-0000-0000-0000-000000000473') = 'non_valido';
+  update esito_caso set ok = ok and (select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000473') = 'in_attesa'
+    and (select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000003') = 'socio'$c$);
+call t.caso('percorso: account in attesa creato da altri → eliminato e sostituito da un account NUOVO socio', $c$
+  call t.attesa('00000000-0000-0000-0000-0000000004a6', '3336661006');
+  call t.verificata('3336661006');
+  select t.vale(t.prenota() = 'ok');
+  update esito_caso set ok = ok and t.elimina('00000000-0000-0000-0000-0000000004a6') = 'ok';
+  select t.account('00000000-0000-0000-0000-000000000475', '3336661006');
+  update esito_caso set ok = ok and t.conferma('00000000-0000-0000-0000-000000000475') = 'ok';
+  update esito_caso set ok = ok
+    and (select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000475') = 'socio'
+    and not exists (select 1 from auth.users where id = '00000000-0000-0000-0000-0000000004a6')$c$);
+
+-- Nuovo profilo: sempre "in attesa", i metadati non contano più
+call t.caso('aggirare: account con app_metadata della prova OTP → in attesa, richiesta NON consumata', $c$
+  call t.verificata('3334444444');
+  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000476', '3334444444@soci.ausergratteri.app',
     jsonb_build_object('registrazione', current_setting('t.r'), 'registrazione_token', t.h(current_setting('t.g'))));
-  select t.vale(ruolo = 'in_attesa') from public.profili where id = '00000000-0000-0000-0000-000000000475'$c$);
-call t.caso('aggirare: gettone di un numero usato per un ALTRO numero → in attesa', $c$
-  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000476', '3338887777@soci.ausergratteri.app',
-    jsonb_build_object('registrazione', current_setting('t.r'), 'registrazione_token', t.h(current_setting('t.g'))));
-  select t.vale(ruolo = 'in_attesa') from public.profili where id = '00000000-0000-0000-0000-000000000476'$c$);
-call t.caso('riuso: lo stesso gettone non crea un secondo socio', $c$
-  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000477', '3334444444@soci.ausergratteri.app',
-    jsonb_build_object('registrazione', current_setting('t.r'), 'registrazione_token', t.h(current_setting('t.g'))));
-  delete from auth.users where id = '00000000-0000-0000-0000-000000000477';
-  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000478', '3334444444@soci.ausergratteri.app',
-    jsonb_build_object('registrazione', current_setting('t.r'), 'registrazione_token', t.h(current_setting('t.g'))));
-  select t.vale(ruolo = 'in_attesa') from public.profili where id = '00000000-0000-0000-0000-000000000478'$c$);
-call t.caso('duplicati: numero già usato da un profilo → in attesa anche con gettone valido', $c$
-  call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  insert into auth.users (id, email) values ('00000000-0000-0000-0000-000000000479', '3334444444@soci.ausergratteri.app');
-  insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000480', '393334444444@soci.ausergratteri.app',
-    jsonb_build_object('registrazione', current_setting('t.r'), 'registrazione_token', t.h(current_setting('t.g'))));
-  select t.vale(ruolo = 'in_attesa') from public.profili where id = '00000000-0000-0000-0000-000000000480'$c$);
+  select t.vale((select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000476') = 'in_attesa'
+    and (select token_hash is not null and usata_il is null from registrazione.richieste where id = current_setting('t.r')::uuid))$c$);
+call t.caso('aggirare: registrazione diretta di un tesserato (solo user_metadata) → in attesa', $c$
+  insert into auth.users (id, email, raw_user_meta_data) values ('00000000-0000-0000-0000-000000000477', '3334444444@soci.ausergratteri.app',
+    '{"nome": "Giovanni", "ruolo": "socio"}');
+  select t.vale(ruolo = 'in_attesa', ruolo) from public.profili where id = '00000000-0000-0000-0000-000000000477'$c$);
 call t.caso('aggirare: metadati con un identificativo malformato → in attesa, nessun errore', $c$
   insert into auth.users (id, email, raw_app_meta_data) values ('00000000-0000-0000-0000-000000000481', '3334444444@soci.ausergratteri.app',
     '{"registrazione": "non-un-uuid''; drop table x;--", "registrazione_token": "x"}');
   select t.vale(ruolo = 'in_attesa') from public.profili where id = '00000000-0000-0000-0000-000000000481'$c$);
-
--- ---------- Riprendere un account "in attesa" con lo stesso numero ----------
-call t.caso('riprendi: dopo l''OTP l''account in attesa diventa socio e le sue sessioni si chiudono', $c$
-  insert into auth.sessions (user_id) values ('00000000-0000-0000-0000-000000000004');
-  call t.verificato('3333333333', 'Concetta', 'Attesa');
-  select t.vale(public.registrazione_riprendi(current_setting('t.r')::uuid, current_setting('t.g'), '00000000-0000-0000-0000-000000000004') = 'ok');
-  update esito_caso set ok = ok and (select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000004') = 'socio'
-    and not exists (select 1 from auth.sessions where user_id = '00000000-0000-0000-0000-000000000004')$c$);
-call t.caso('riprendi: una seconda volta con lo stesso gettone → non valido', $c$
-  call t.verificato('3333333333', 'Concetta', 'Attesa');
-  select public.registrazione_riprendi(current_setting('t.r')::uuid, current_setting('t.g'), '00000000-0000-0000-0000-000000000004');
-  update public.profili set ruolo = 'in_attesa' where id = '00000000-0000-0000-0000-000000000004';
-  select t.vale(public.registrazione_riprendi(current_setting('t.r')::uuid, current_setting('t.g'), '00000000-0000-0000-0000-000000000004') = 'non_valido')$c$);
-call t.caso('riprendi: mai su un account socio, direttivo o presidente', $c$
-  call t.verificato('3333333333', 'Concetta', 'Attesa');
-  select t.vale(public.registrazione_riprendi(current_setting('t.r')::uuid, current_setting('t.g'), '00000000-0000-0000-0000-000000000003') = 'non_valido'
-    and public.registrazione_riprendi(current_setting('t.r')::uuid, current_setting('t.g'), '00000000-0000-0000-0000-000000000002') = 'non_valido'
-    and public.registrazione_riprendi(current_setting('t.r')::uuid, current_setting('t.g'), '00000000-0000-0000-0000-000000000001') = 'non_valido'
-    and (select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000003') = 'socio')$c$);
-call t.caso('riprendi: gettone di un altro numero → non valido', $c$
-  insert into auth.users (id, email) values ('00000000-0000-0000-0000-000000000482', '3338887777@soci.ausergratteri.app');
-  call t.verificato('3333333333', 'Concetta', 'Attesa');
-  select t.vale(public.registrazione_riprendi(current_setting('t.r')::uuid, current_setting('t.g'), '00000000-0000-0000-0000-000000000482') = 'non_valido'
-    and (select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000482') = 'in_attesa')$c$);
 
 -- ---------- Registrazione manuale (resta in attesa) ----------
 call t.caso('manuale: consentita, poi al massimo 3 al giorno per numero', $c$
@@ -259,7 +355,9 @@ call t.caso('manuale: l''account creato senza OTP resta in attesa anche per un t
 -- ---------- Nessun segreto in chiaro ----------
 call t.caso('segreti: la tabella delle richieste ha solo impronte (64 caratteri esadecimali)', $c$
   call t.verificato('3334444444', 'Giovanni', 'Bianchi');
-  select t.vale(not exists (select 1 from registrazione.richieste r where r::text like '%777777%' or r::text like '%' || current_setting('t.g') || '%'))$c$);
+  select t.vale(t.prenota() = 'ok');
+  update esito_caso set ok = ok and not exists (select 1 from registrazione.richieste r where r::text like '%777777%' or r::text like '%' || current_setting('t.g') || '%'
+    or r::text like '%' || current_setting('t.p') || '%')$c$);
 
 \pset format unaligned
 \pset tuples_only on

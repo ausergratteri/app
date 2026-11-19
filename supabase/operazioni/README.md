@@ -110,6 +110,9 @@ pubblicazione della funzione server: `../functions/registrazione/LEGGIMI.md`.
 | — | `12_rollback_registrazione_otp.sql` + app precedente + riattivare le iscrizioni pubbliche | | Sì |
 
 Note:
+* **Prima di O3**: in un progetto di prova in cloud verificare che la migrazione possa cancellare da
+  `auth.users` (sostituzione di un account "in attesa" senza dati) e misurare il tempo tra
+  prenotazione e conferma (finestra di 2 minuti). Finché non è verificato, non eseguire in produzione.
 * Ordine importante: O3 prima di O5 (la nuova app usa la funzione server), O4 prima di O5.
   Tra O3 e O5 la vecchia app continua a registrare, ma i nuovi account restano "in attesa"
   (il direttivo li approva): nessuno viene bloccato e nessuno entra senza verifica.
@@ -127,8 +130,8 @@ Note:
 | controlla_foto | 5e2884a0 dopo 20261118, 4fc9e77e dopo 20261120 |
 | controlla_ruolo | cdb7ca58 |
 | importa_tesserati | 36f1f714 |
-| nuovo_profilo | d08f0d69 fino a 20261122; **758f505f** dopo 20261123 |
+| nuovo_profilo | d08f0d69 fino a 20261122; **3adac188** dopo 20261123 |
 | reimposta_pin | bf88cbc1 |
 | livello / pulisci_adesioni / solo_cifre_tel / sveglia | invariate (1d5541a5 / c7966924 / 2dcd1ade / ccea2d8b) |
-| registrazione_avvia / _verifica / _gettone / _riprendi / _manuale_consentita (dopo 20261123) | 6b704981 / 771510cd / ade4e798 / 4d54e588 / cf293dc3 |
-| registrazione.consuma / parole / nomi_corrispondono (dopo 20261123) | f2813a1c / 4d146bf2 / 26bd802d |
+| registrazione_avvia / _verifica / _prenota / _elimina_attesa / _conferma / _manuale_consentita (dopo 20261123) | 6b704981 / 771510cd / da45f1c3 / 296211bf / 91b3efca / cf293dc3 |
+| registrazione.ha_dati / parole / nomi_corrispondono (dopo 20261123) | 77b8b175 / 4d146bf2 / 26bd802d |

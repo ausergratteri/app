@@ -13,6 +13,7 @@
 #   8. registrazione con OTP (20261123) sullo schema oggi in produzione (59be38f): account,
 #      profili, PIN e dati invariati, migrazione ripetibile, test, rollback identico
 #   9. registrazione con OTP dall'inizio alla fine: logica della funzione server (Node) + SQL vero
+#  10. registrazione con OTP: prenotazioni, eliminazioni e conferme simultanee → ne passa una sola
 # I riferimenti di confronto sono commit fissi (main oggi contiene già le correzioni):
 #   BASE_REF            schema prima di tutte le correzioni di sicurezza
 #   CONFRONTO_REF       schema prima della correzione dei posti
@@ -27,8 +28,16 @@ PRIMA_OTP="${PRIMA_OTP_REF:-59be38f}"
 NOME="auser-test-sql-$$"
 TMP="$(mktemp -d)"
 
+# Pulizia anche in caso di errore o interruzione: container E volume anonimo dei dati (-v).
+# (docker rm -f senza -v anticipa la rimozione automatica di --rm e lascerebbe il volume.)
+pulisci() {
+  docker rm -fv "$NOME" >/dev/null 2>&1 || true
+  rm -rf "$TMP"
+  if docker ps -aq --filter "name=^$NOME\$" | grep -q .; then echo "ATTENZIONE: container $NOME non rimosso" >&2; fi
+}
+trap pulisci EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 docker run -d --rm --name "$NOME" --network none -e POSTGRES_HOST_AUTH_METHOD=trust "$IMMAGINE" >/dev/null
-trap 'docker rm -f "$NOME" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 for _ in $(seq 60); do
   docker logs "$NOME" 2>&1 | grep -q "init process complete" && docker exec "$NOME" pg_isready -U postgres -q && break
   sleep 1
@@ -203,7 +212,13 @@ echo "$out14" | grep -q "Esiste già un presidente" && [ "$(echo "select ruolo f
   || echo "FAIL|database nuovo: lo script ha nominato un secondo presidente" >> "$TMP/9.txt"
 echo "   $(grep -c '^PASS' "$TMP/9.txt") PASS, $(grep -c '^FAIL' "$TMP/9.txt" || true) FAIL"
 
-if grep -q '^FAIL' "$TMP/1.txt" "$TMP/2.txt" "$TMP/4.txt" "$TMP/5.txt" "$TMP/6.txt" "$TMP/7.txt" "$TMP/8.txt" "$TMP/9.txt" || ! grep -q '^PASS' "$TMP/9.txt" || ! grep -q '^PASS' "$TMP/1.txt" || ! grep -q '^PASS' "$TMP/2.txt" \
+echo "== 10. Registrazione con OTP: richieste simultanee sullo stesso gettone e sullo stesso account"
+docker exec "$NOME" createdb -U postgres concorrenza_otp
+cat $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql | docker exec -i -e PGOPTIONS="-c client_min_messages=warning" "$NOME" psql -U postgres -d concorrenza_otp -v ON_ERROR_STOP=1 -q -X >/dev/null
+bash $T/concorrenza_otp.sh "$NOME" concorrenza_otp > "$TMP/10.txt" 2>&1 || true
+sed 's/^/   /' "$TMP/10.txt"
+
+if grep -q '^FAIL' "$TMP/1.txt" "$TMP/2.txt" "$TMP/4.txt" "$TMP/5.txt" "$TMP/6.txt" "$TMP/7.txt" "$TMP/8.txt" "$TMP/9.txt" "$TMP/10.txt" || [ "$(grep -c '^PASS' "$TMP/10.txt")" != 3 ] || ! grep -q '^PASS' "$TMP/9.txt" || ! grep -q '^PASS' "$TMP/1.txt" || ! grep -q '^PASS' "$TMP/2.txt" \
    || ! grep -q '^PASS' "$TMP/4.txt" || ! grep -q '^PASS' "$TMP/5.txt" || ! grep -q '^PASS' "$TMP/6.txt" || ! grep -q '^PASS' "$TMP/7.txt" || ! grep -q '^PASS' "$TMP/8.txt"; then
   echo "ESITO: test SQL NON superati"; exit 1
 fi

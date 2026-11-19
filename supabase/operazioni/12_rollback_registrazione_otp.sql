@@ -41,6 +41,9 @@ drop function if exists public.registrazione_verifica(uuid, text);
 drop function if exists public.registrazione_gettone(uuid, text);
 drop function if exists public.registrazione_riprendi(uuid, text, uuid);
 drop function if exists public.registrazione_manuale_consentita(text, text);
-drop schema if exists registrazione cascade;
+drop function if exists public.registrazione_prenota(uuid, text);
+drop function if exists public.registrazione_elimina_attesa(uuid, text, uuid);
+drop function if exists public.registrazione_conferma(uuid, text, uuid);
+drop schema if exists registrazione cascade;   -- anche registrazione.ha_dati e le colonne della prenotazione
 
 commit;

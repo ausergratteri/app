@@ -15,7 +15,8 @@ create table auth.users (
   email              text unique,
   raw_user_meta_data jsonb not null default '{}'::jsonb,
   raw_app_meta_data  jsonb not null default '{}'::jsonb,   -- lo scrive solo l'API admin (service role)
-  encrypted_password text
+  encrypted_password text,
+  created_at         timestamptz not null default now()
 );
 create table auth.sessions (
   id      uuid primary key default gen_random_uuid(),
@@ -37,6 +38,7 @@ create table storage.objects (
   bucket_id text not null,
   name      text not null,
   owner     uuid default auth.uid(),
+  owner_id  text,
   metadata  jsonb   -- come in Supabase: {"size": ..., "eTag": "...", "mimetype": ...}
 );
 alter table storage.objects enable row level security;

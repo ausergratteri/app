@@ -3,7 +3,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import {gestisci, codiceDaByte, messaggioEmail, ipDaIntestazioni, MESSAGGIO_AVVIO, MESSAGGIO_MANUALE} from "../supabase/functions/registrazione/logica.ts";
+import {gestisci, codiceDaByte, configSmtp, indirizzoLocale, verificaIpSmtp, messaggioEmail, ipDaIntestazioni, MESSAGGIO_AVVIO, MESSAGGIO_MANUALE} from "../supabase/functions/registrazione/logica.ts";
+import fs from "node:fs";
 
 const RICHIESTA = "11111111-2222-4333-8444-555555555555";
 const GETTONE = "a".repeat(64);
@@ -136,55 +137,119 @@ test("verifica: codice non di 6 cifre o richiesta non valida → 400 senza consu
   }
 });
 
-// ---------- completa ----------
-const gettoneOk = (extra = {}) => ({registrazione_gettone: [{esito: "ok", telefono: "3334444444", nome: "Bianchi Giovanni", account_in_attesa: null, ...extra}]});
+// ---------- completa: prenotazione atomica → (eliminazione account in attesa) → account NUOVO → conferma ----------
+const PREN = "c".repeat(64);
+const NUOVO = "99999999-2222-4333-8444-555555555555";
+const ATTESA = "77777777-2222-4333-8444-555555555555";
+const prenotaOk = (extra = {}) => ({registrazione_prenota: [{esito: "ok", prenotazione: PREN, telefono: "3334444444", nome: "Bianchi Giovanni", account_in_attesa: null, ...extra}]});
+const confermaOk = {registrazione_conferma: [{registrazione_conferma: "ok"}]};
 const COMPLETA = {azione: "completa", richiesta: RICHIESTA, gettone: GETTONE, pin: "135790"};
-test("completa: crea l'account con l'indirizzo calcolato dal telefono del DATABASE e la prova OTP in app_metadata", async () => {
-  const {d, st} = finte({risposte: gettoneOk()});
+const nessunSegreto = st => {
+  assert.equal(segreti(st, "135790", GETTONE, PREN, "3334444444"), null, "nessun PIN, gettone, prenotazione o telefono nei registri");
+  const args = JSON.stringify(st.rpc);
+  assert.ok(!args.includes(GETTONE) && !args.includes("135790"), "al database né il gettone in chiaro né il PIN");
+};
+
+test("completa: nuovo account → prenota (solo impronta), crea senza app_metadata, conferma quell'account", async () => {
+  const {d, st} = finte({risposte: {...prenotaOk(), ...confermaOk}});
   const r = await gestisci({...COMPLETA, telefono: "3330000000", email: "x@y.it"}, "1.2.3.4", d);
   assert.deepEqual(r, {stato: 200, corpo: {esito: "ok"}});
-  assert.equal(st.creati.length, 1);
+  assert.deepEqual(st.ordine, ["rpc:registrazione_prenota", "crea", "rpc:registrazione_conferma"]);
+  assert.deepEqual(st.rpc[0].a, {p_richiesta: RICHIESTA, p_token_hash: sha(GETTONE)});
   const u = st.creati[0];
-  assert.equal(u.email, "3334444444@soci.ausergratteri.app");
+  assert.equal(u.email, "3334444444@soci.ausergratteri.app", "indirizzo dal telefono del DATABASE");
   assert.equal(u.password, "135790");
-  assert.deepEqual(u.app_metadata, {registrazione: RICHIESTA, registrazione_token: sha(GETTONE)});
-  assert.ok(!JSON.stringify(u.app_metadata).includes(GETTONE), "il gettone non finisce nei metadati");
-  assert.equal(segreti(st, "135790", GETTONE, "3334444444"), null);
+  assert.equal(u.app_metadata, undefined);
+  assert.deepEqual(st.rpc[1].a, {p_richiesta: RICHIESTA, p_prenotazione: PREN, p_utente: NUOVO});
+  assert.equal(st.pin.length, 0);
+  nessunSegreto(st);
+});
+test("completa: account in attesa → eliminato dal database e sostituito; il suo PIN non si cambia mai", async () => {
+  const {d, st} = finte({risposte: {...prenotaOk({account_in_attesa: ATTESA}), registrazione_elimina_attesa: [{registrazione_elimina_attesa: "ok"}], ...confermaOk}});
+  assert.deepEqual(await gestisci(COMPLETA, "1.2.3.4", d), {stato: 200, corpo: {esito: "ok"}});
+  assert.deepEqual(st.ordine, ["rpc:registrazione_prenota", "rpc:registrazione_elimina_attesa", "crea", "rpc:registrazione_conferma"]);
+  assert.deepEqual(st.rpc[1].a, {p_richiesta: RICHIESTA, p_prenotazione: PREN, p_utente: ATTESA});
+  assert.equal(st.rpc[2].a.p_utente, NUOVO, "si conferma l'account NUOVO, non quello in attesa");
+  assert.equal(st.pin.length, 0);
+  nessunSegreto(st);
 });
 test("completa: PIN non valido → 400 senza toccare database o account", async () => {
   for (const pin of ["12345", "1234567890123", "abcdef", "", 135790]) {
-    const {d, st} = finte({risposte: gettoneOk()});
+    const {d, st} = finte({risposte: prenotaOk()});
     assert.deepEqual(await gestisci({...COMPLETA, pin}, "1.2.3.4", d), {stato: 400, corpo: {esito: "pin_non_valido"}});
-    assert.equal(st.rpc.length + st.creati.length, 0);
+    assert.equal(st.rpc.length + st.creati.length + st.pin.length, 0);
   }
 });
-test("completa: gettone non valido, scaduto o già usato → nessun account", async () => {
-  const {d, st} = finte({risposte: {registrazione_gettone: [{esito: "non_valido"}]}});
-  assert.deepEqual(await gestisci(COMPLETA, "1.2.3.4", d), {stato: 400, corpo: {esito: "non_valido"}});
-  assert.equal(st.creati.length, 0);
+test("completa: prenotazione rifiutata (scaduto, riusato, errato, già socio, ex socio con dati) → nessun altro passo", async () => {
+  for (const [esito, stato, corpo] of [["non_valido", 400, "non_valido"], ["gia_registrato", 409, "gia_registrato"], ["serve_direttivo", 409, "non_completabile"], ["strano", 400, "non_valido"]]) {
+    const {d, st} = finte({risposte: {registrazione_prenota: [{esito}]}});
+    assert.deepEqual(await gestisci(COMPLETA, "1.2.3.4", d), {stato, corpo: {esito: corpo}}, esito);
+    assert.deepEqual(st.ordine, ["rpc:registrazione_prenota"], esito);
+    assert.equal(st.creati.length + st.pin.length, 0);
+  }
+  const vuoto = finte({risposte: {}});
+  assert.equal((await gestisci(COMPLETA, "1.2.3.4", vuoto.d)).stato, 400);
 });
-test("completa: numero già registrato come socio → 409, nessun account né cambio PIN", async () => {
-  const {d, st} = finte({risposte: {registrazione_gettone: [{esito: "gia_registrato"}]}});
-  assert.equal((await gestisci(COMPLETA, "1.2.3.4", d)).stato, 409);
-  assert.equal(st.creati.length + st.pin.length, 0);
+test("completa: prenotazione 'ok' ma malformata → 400, nessun account", async () => {
+  for (const extra of [{prenotazione: "corta"}, {prenotazione: null}, {telefono: "abc"}, {telefono: null}]) {
+    const {d, st} = finte({risposte: prenotaOk(extra)});
+    assert.equal((await gestisci(COMPLETA, "1.2.3.4", d)).stato, 400, JSON.stringify(extra));
+    assert.equal(st.creati.length, 0);
+  }
 });
-test("completa: doppione (account già creato nel frattempo) → 409 non completabile", async () => {
-  const {d} = finte({risposte: gettoneOk(), creaErrore: "email_exists"});
+test("completa: eliminazione dell'account in attesa rifiutata o con dati → 409, nessun account nuovo", async () => {
+  for (const [esito, log] of [["non_valido", "attesa_non_eliminato"], ["serve_direttivo", "serve_direttivo"], [undefined, "attesa_non_eliminato"]]) {
+    const {d, st} = finte({risposte: {...prenotaOk({account_in_attesa: ATTESA}), registrazione_elimina_attesa: esito ? [{registrazione_elimina_attesa: esito}] : []}});
+    assert.deepEqual(await gestisci(COMPLETA, "1.2.3.4", d), {stato: 409, corpo: {esito: "non_completabile"}});
+    assert.equal(st.creati.length + st.pin.length, 0);
+    assert.ok(!st.ordine.includes("rpc:registrazione_conferma"));
+    assert.ok(st.log.some(l => l.includes(log)), log);
+  }
+});
+test("completa: creazione dell'account fallita → 409, nessuna conferma", async () => {
+  const {d, st} = finte({risposte: prenotaOk(), creaErrore: "email_exists"});
   assert.deepEqual(await gestisci(COMPLETA, "1.2.3.4", d), {stato: 409, corpo: {esito: "non_completabile"}});
+  assert.ok(!st.ordine.includes("rpc:registrazione_conferma"));
 });
-test("completa: account 'in attesa' con lo stesso numero → prima il nuovo PIN, poi la promozione", async () => {
-  const ATTESA = "77777777-2222-4333-8444-555555555555";
-  const {d, st} = finte({risposte: {...gettoneOk({account_in_attesa: ATTESA}), registrazione_riprendi: [{registrazione_riprendi: "ok"}]}});
-  assert.deepEqual(await gestisci(COMPLETA, "1.2.3.4", d), {stato: 200, corpo: {esito: "ok"}});
-  assert.deepEqual(st.ordine, ["rpc:registrazione_gettone", "pin", "rpc:registrazione_riprendi"]);
-  assert.deepEqual(st.pin, [{id: ATTESA, pin: "135790"}]);
-  assert.equal(st.creati.length, 0);
+test("completa: conferma rifiutata → 400 (l'account resta in attesa, senza privilegi)", async () => {
+  for (const r of [[{registrazione_conferma: "non_valido"}], [], [{}]]) {
+    const {d, st} = finte({risposte: {...prenotaOk(), registrazione_conferma: r}});
+    assert.deepEqual(await gestisci(COMPLETA, "1.2.3.4", d), {stato: 400, corpo: {esito: "non_valido"}});
+    assert.ok(st.log.some(l => l.includes("creato_in_attesa")));
+  }
 });
-test("completa: se il PIN dell'account in attesa non cambia, NON si promuove", async () => {
-  const ATTESA = "77777777-2222-4333-8444-555555555555";
-  const {d, st} = finte({risposte: gettoneOk({account_in_attesa: ATTESA}), pinErrore: "errore"});
-  assert.equal((await gestisci(COMPLETA, "1.2.3.4", d)).stato, 500);
-  assert.ok(!st.ordine.includes("rpc:registrazione_riprendi"));
+test("completa: errore del database a ogni passo → 500 e nessun passo successivo", async () => {
+  const guasto = () => { throw new Error("rpc: XX000"); };
+  const casi = [
+    [{registrazione_prenota: guasto}, ["rpc:registrazione_prenota"]],
+    [{...prenotaOk({account_in_attesa: ATTESA}), registrazione_elimina_attesa: guasto}, ["rpc:registrazione_prenota", "rpc:registrazione_elimina_attesa"]],
+    [{...prenotaOk(), registrazione_conferma: guasto}, ["rpc:registrazione_prenota", "crea", "rpc:registrazione_conferma"]]];
+  for (const [risposte, ordine] of casi) {
+    const {d, st} = finte({risposte});
+    assert.equal((await gestisci(COMPLETA, "1.2.3.4", d)).stato, 500);
+    assert.deepEqual(st.ordine, ordine);
+    assert.equal(st.pin.length, 0);
+    nessunSegreto(st);
+  }
+});
+test("completa: la migrazione e lo schema usano prenotazione/eliminazione/conferma atomiche, solo per service_role", () => {
+  for (const nome of ["../supabase/migrations/20261123_registrazione_otp.sql", "../supabase/schema.sql"]) {
+    const sql = fs.readFileSync(new URL(nome, import.meta.url), "utf8");
+    const corpo = f => { const i = sql.indexOf(`function ${f}(`); assert.ok(i >= 0, f + " in " + nome); return sql.slice(i, sql.indexOf("end $$;", i)); };
+    for (const f of ["public.registrazione_prenota", "public.registrazione_elimina_attesa", "public.registrazione_conferma"]) {
+      assert.match(corpo(f), /from registrazione\.richieste where id = p_richiesta and tipo = 'otp' for update;/, f);
+      assert.ok(sql.includes(`'${f}(`), f + " nell'elenco dei permessi solo service_role");
+    }
+    assert.match(corpo("public.registrazione_prenota"), /set token_hash = null where id = r\.id;   -- consumato da qui/);
+    assert.match(corpo("public.registrazione_elimina_attesa"), /p\.ruolo = 'in_attesa'[\s\S]*for update;[\s\S]*ha_dati\(p_utente\)[\s\S]*delete from auth\.users where id = p_utente;/);
+    assert.match(corpo("public.registrazione_conferma"), /creato < r\.prenotata_il/);
+    const hd = sql.slice(sql.indexOf("function registrazione.ha_dati("), sql.indexOf("$$;", sql.indexOf("function registrazione.ha_dati(")));
+    for (const t of ["public.adesioni", "public.foto", "public.importazioni", "storage.objects", "storage.foldername"]) assert.ok(hd.includes(t), t);
+    assert.match(sql, /revoke execute on function registrazione\.ha_dati\(uuid\) from public, anon, authenticated;/);
+    const np = corpo("public.nuovo_profilo");
+    assert.ok(!/raw_app_meta_data|consuma\(|'socio'/.test(np) && /, tel, 'in_attesa'\);/.test(np), "nuovo_profilo: sempre in attesa");
+    assert.ok(!/create or replace function (public\.registrazione_gettone|public\.registrazione_riprendi|registrazione\.consuma)\b/.test(sql), "funzioni vecchie assenti");
+  }
 });
 
 // ---------- manuale ----------
@@ -251,4 +316,128 @@ test("IP falsificato a ogni richiesta: il limite per numero resta (deciso dal da
   const {d} = finte({risposte: {registrazione_avvia: () => [n++ === 0 ? {richiesta: RICHIESTA, esito: "ok", invia: false} : {richiesta: null, esito: "troppe_richieste", invia: false}]}});
   assert.equal((await gestisci(DATI, "1.1.1.1", d)).stato, 200);
   assert.equal((await gestisci(DATI, "9.9.9.9", d)).stato, 429);
+});
+
+// ---------------------------------------------------------------------------
+// Configurazione SMTP: TLS predefinito; in chiaro (SMTP_SICURO="0") solo verso host locali o il
+// Mailpit dello stack Supabase locale, e mai con credenziali.
+const amb = o => k => o[k] ?? "";
+
+test("SMTP: senza impostazioni resta Gmail, 465, TLS con credenziali (produzione invariata)", () => {
+  assert.deepEqual(configSmtp(amb({})), {ok: true, host: "smtp.gmail.com", porta: 465, sicuro: true, conAccesso: true});
+});
+
+test("SMTP: con TLS SMTP_IP_ATTESO è ignorato e il risultato resta identico", () => {
+  assert.deepEqual(configSmtp(amb({SMTP_IP_ATTESO: "172.18.0.5"})),
+    {ok: true, host: "smtp.gmail.com", porta: 465, sicuro: true, conAccesso: true});
+  const c = configSmtp(amb({SMTP_HOST: "smtp.gmail.com", SMTP_PORTA: "465", SMTP_SICURO: "1", SMTP_IP_ATTESO: "8.8.8.8"}));
+  assert.deepEqual(c, {ok: true, host: "smtp.gmail.com", porta: 465, sicuro: true, conAccesso: true});
+  assert.ok(!("ipAtteso" in c));
+});
+
+test("SMTP: in chiaro ammesso verso localhost, 127.0.0.1, ::1 con IP atteso locale, senza credenziali", () => {
+  for (const [h, ip] of [["localhost", "127.0.0.1"], ["127.0.0.1", "127.0.0.1"], ["::1", "::1"], ["LOCALHOST", "127.0.0.1"], [" localhost ", " 127.0.0.1 "]]) {
+    const c = configSmtp(amb({SMTP_HOST: h, SMTP_PORTA: "1025", SMTP_SICURO: "0", SMTP_IP_ATTESO: ip}));
+    assert.equal(c.ok, true, h);
+    assert.equal(c.sicuro, false, h);
+    assert.equal(c.conAccesso, false, h);
+    assert.equal(c.porta, 1025, h);
+    assert.equal(c.ipAtteso, ip.trim(), h);
+  }
+});
+
+test("SMTP: in chiaro ammesso verso il Mailpit dello stack Supabase locale con il suo IP esatto", () => {
+  for (const h of ["supabase_inbucket_auser-otp-prova-locale", "supabase_mailpit_auser_otp"]) {
+    assert.deepEqual(configSmtp(amb({SMTP_HOST: h, SMTP_PORTA: "1025", SMTP_SICURO: "0", SMTP_IP_ATTESO: "172.18.0.7"})),
+      {ok: true, host: h, porta: 1025, sicuro: false, conAccesso: false, ipAtteso: "172.18.0.7"});
+  }
+});
+
+test("SMTP: in chiaro senza IP atteso valido e locale la configurazione fallisce", () => {
+  const h = "supabase_inbucket_auser-otp-prova-locale";
+  for (const ip of [undefined, "", " ", "abc", "172.18.0", "172.18.0.256", "8.8.8.8", "0.0.0.0", "172.32.0.1",
+    "172.15.255.1", "192.169.0.1", "11.0.0.1", "::", "::ffff:127.0.0.1", "fe80::1", "172.18.0.7,172.18.0.8", "localhost", h]) {
+    const c = configSmtp(amb({SMTP_HOST: h, SMTP_PORTA: "1025", SMTP_SICURO: "0", ...(ip === undefined ? {} : {SMTP_IP_ATTESO: ip})}));
+    assert.deepEqual(c, {ok: false, errore: "smtp_ip_atteso_non_valido"}, JSON.stringify(ip));
+  }
+});
+
+test("SMTP: host non ammesso fallisce anche con IP atteso valido", () => {
+  const c = configSmtp(amb({SMTP_HOST: "mail.esempio.it", SMTP_PORTA: "25", SMTP_SICURO: "0", SMTP_IP_ATTESO: "172.18.0.7"}));
+  assert.deepEqual(c, {ok: false, errore: "smtp_in_chiaro_non_consentito"});
+});
+
+test("SMTP: alias esatto \"inbucket\" ammesso solo con IP atteso valido", () => {
+  assert.deepEqual(configSmtp(amb({SMTP_HOST: "inbucket", SMTP_PORTA: "1025", SMTP_SICURO: "0", SMTP_IP_ATTESO: "172.18.0.7"})),
+    {ok: true, host: "inbucket", porta: 1025, sicuro: false, conAccesso: false, ipAtteso: "172.18.0.7"});
+  assert.equal(configSmtp(amb({SMTP_HOST: " INBUCKET ", SMTP_SICURO: "0", SMTP_IP_ATTESO: "172.18.0.7"})).ok, true);
+  for (const ip of ["", "8.8.8.8", "0.0.0.0"])
+    assert.deepEqual(configSmtp(amb({SMTP_HOST: "inbucket", SMTP_SICURO: "0", SMTP_IP_ATTESO: ip})),
+      {ok: false, errore: "smtp_ip_atteso_non_valido"}, ip);
+  for (const h of ["inbucket.esempio.com", "inbucket1", "x-inbucket", "inbucket.", "inbucket:1025", "in bucket"])
+    assert.deepEqual(configSmtp(amb({SMTP_HOST: h, SMTP_SICURO: "0", SMTP_IP_ATTESO: "172.18.0.7"})),
+      {ok: false, errore: "smtp_in_chiaro_non_consentito"}, h);
+});
+
+test("SMTP: indirizzoLocale accetta solo loopback e reti private IPv4", () => {
+  for (const ip of ["127.0.0.1", "127.1.2.3", "::1", "10.0.0.1", "10.255.255.255", "172.16.0.1", "172.31.255.254", "192.168.0.1"])
+    assert.equal(indirizzoLocale(ip), true, ip);
+  for (const ip of ["", "8.8.8.8", "0.0.0.0", "172.15.0.1", "172.32.0.1", "192.167.1.1", "169.254.1.1", "127.0.0.256",
+    "10.0.0", "10.0.0.1.5", " 10.0.0.1", "::", "fe80::1", "::ffff:10.0.0.1", "localhost", "010.0.0.1x"])
+    assert.equal(indirizzoLocale(ip), false, JSON.stringify(ip));
+});
+
+test("SMTP: verificaIpSmtp vuole almeno un indirizzo e tutti uguali a quello atteso", () => {
+  assert.equal(verificaIpSmtp(["172.18.0.7"], "172.18.0.7"), true);
+  assert.equal(verificaIpSmtp(["172.18.0.7", "172.18.0.7"], "172.18.0.7"), true);
+  assert.equal(verificaIpSmtp([], "172.18.0.7"), false);
+  assert.equal(verificaIpSmtp(["172.18.0.8"], "172.18.0.7"), false);
+  assert.equal(verificaIpSmtp(["172.18.0.7", "93.184.216.34"], "172.18.0.7"), false);
+  assert.equal(verificaIpSmtp(["93.184.216.34", "172.18.0.7"], "172.18.0.7"), false);
+  assert.equal(verificaIpSmtp(["172.18.0.70"], "172.18.0.7"), false);
+});
+
+test("SMTP: in chiaro verso qualsiasi altro host la configurazione fallisce", () => {
+  const rifiutati = ["", "smtp.gmail.com", "mail.esempio.it", "localhost.esempio.com", "127.0.0.1.nip.io",
+    "supabase_inbucket_x.esempio.com", "supabase_inbucket_", "10.0.0.5", "192.168.1.10",
+    "host.docker.internal", "127.0.0.2", "mailpit", "[::1]", "localhost:1025"];
+  for (const h of rifiutati) {
+    const c = configSmtp(amb({SMTP_HOST: h, SMTP_PORTA: "25", SMTP_SICURO: "0", SMTP_IP_ATTESO: "172.18.0.7"}));
+    assert.deepEqual(c, {ok: false, errore: "smtp_in_chiaro_non_consentito"}, JSON.stringify(h));
+    assert.ok(!JSON.stringify(c).includes("25") && !("host" in c), "l'esito rifiutato non contiene host né porta");
+  }
+});
+
+test("SMTP: solo \"0\" esatto toglie il TLS; altri valori lo mantengono", () => {
+  for (const v of ["", "false", "no", " 0x", "00", "1"]) {
+    const c = configSmtp(amb({SMTP_HOST: "mail.esempio.it", SMTP_SICURO: v}));
+    assert.equal(c.ok, true, JSON.stringify(v));
+    assert.equal(c.sicuro, true, JSON.stringify(v));
+    assert.equal(c.conAccesso, true, JSON.stringify(v));
+  }
+});
+
+test("SMTP: porta non valida torna a 465", () => {
+  for (const p of ["abc", "0", "70000", "1.5", "-1", ""]) {
+    assert.equal(configSmtp(amb({SMTP_PORTA: p})).porta, 465, JSON.stringify(p));
+  }
+  assert.equal(configSmtp(amb({SMTP_PORTA: "587"})).porta, 587);
+});
+
+test("SMTP: index.ts crea il trasporto solo con configurazione valida, verifica l'IP senza TLS e risponde 503 altrimenti", () => {
+  const src = fs.readFileSync(new URL("../supabase/functions/registrazione/index.ts", import.meta.url), "utf8");
+  assert.match(src, /const SMTP = configSmtp\(ambiente\);/);
+  assert.match(src, /const postaTls = SMTP\.ok && SMTP\.sicuro \? nodemailer\.createTransport\(opzioniPosta\(SMTP\.host, SMTP\.porta, true\)\) : null;/,
+    "con TLS: trasporto verso l'host configurato, come prima");
+  assert.equal((src.match(/createTransport\(/g) || []).length, 2, "solo il trasporto TLS e quello locale verificato");
+  assert.match(src, /\.\.\.\(sicuro \? \{auth:/, "credenziali solo con TLS");
+  assert.match(src, /if \(!SMTP\.ok\) return Promise\.resolve\(null\);/);
+  assert.match(src, /lookup\(host, \{all: true, family:/, "senza TLS il nome viene risolto prima");
+  assert.match(src, /if \(!verificaIpSmtp\(r\.map\(x => x\.address\), ipAtteso\)\) throw new Error\("smtp_ip_non_atteso"\);/);
+  assert.match(src, /nodemailer\.createTransport\(opzioniPosta\(ipAtteso, porta, false\)\)/, "connessione all'IP verificato, non al nome");
+  assert.match(src, /if \(SMTP\.ok && ambiente\("DIAGNOSI_SMTP"\) === "1"\)/);
+  assert.match(src, /if \(!SMTP\.ok \|\| !URL_PROGETTO/);
+  assert.match(src, /const t = await trasporto\(\);\s*if \(!t\) throw new Error\("smtp_non_configurato"\);/);
+  assert.ok(!/host:\s*"smtp\.gmail\.com"/.test(src), "nessun host scritto direttamente nel trasporto");
+  assert.ok(!/log\([^)]*ipAtteso/.test(src) && !/log\([^)]*address/.test(src), "nessun IP nei registri");
 });
