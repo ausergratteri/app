@@ -18,6 +18,10 @@ with m(ord, misura, valore) as (
   union all select 26, 'foto (righe)', (select count(*) from public.foto)::text
   union all select 27, 'impostazioni', (select count(*) from public.impostazioni)::text
   union all select 28, 'importazioni', (select count(*) from public.importazioni)::text
+  union all select 29, 'registrazione: funzioni / richieste',
+    (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'registrazione') || ' / ' ||
+    coalesce((select (xpath('/row/c/text()', query_to_xml('select count(*) as c from registrazione.richieste', false, true, '')))[1]::text
+              where to_regclass('registrazione.richieste') is not null), 'tabella assente')
   union all select 30, 'storage: bucket', (select coalesce(string_agg(id || (case when public then '(pubblico)' else '(privato)' end), ', ' order by id), 'nessuno') from storage.buckets)
   union all select 31, 'storage: oggetti per bucket', (select coalesce(string_agg(bucket_id || '=' || n, ', ' order by bucket_id), 'nessuno') from (select bucket_id, count(*) n from storage.objects group by bucket_id) x)
   union all select 32, 'storage: byte totali (dai metadati)', (select coalesce(sum((metadata->>'size')::bigint), 0) from storage.objects)::text

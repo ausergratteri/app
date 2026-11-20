@@ -7,7 +7,8 @@
 #  - Chiede host e utente del "Session pooler" (Supabase → Connect) e la password del database,
 #    senza mostrarla; l'utente deve essere postgres.<identificativo di config.js> (produzione).
 #  - pg_dump 17 in un container Docker usa e getta, formato custom (-Fc), schemi:
-#    public, auth, storage e backup_* (dati, struttura, regole, funzioni, trigger, permessi).
+#    public, auth, storage, registrazione (richieste OTP e funzioni della registrazione) e backup_*
+#    (dati, struttura, regole, funzioni, trigger, permessi).
 #  - Alla fine: impronta SHA-256, controllo che l'archivio sia leggibile, numero di tabelle con dati.
 #  Non stampa dati, password o chiavi. Non modifica nulla in produzione.
 # =====================================================================
@@ -32,7 +33,7 @@ umask 077
 echo "Backup in corso (sola lettura sul database)…"
 docker run --rm -e PGPASSWORD -e PGSSLMODE -v "$DEST":/out postgres:17 \
   pg_dump -h "$HOST" -p 5432 -U "$UTENTE" -d postgres -Fc -Z 6 \
-    -n public -n auth -n storage -n 'backup_*' -f "/out/$NOME" 2> "$DEST/$NOME.registro" \
+    -n public -n auth -n storage -n registrazione -n 'backup_*' -f "/out/$NOME" 2> "$DEST/$NOME.registro" \
   || { echo "STOP: pg_dump non riuscito (dettagli tecnici in $DEST/$NOME.registro, senza password)"; exit 1; }
 unset PGPASSWORD
 chmod 600 "$DEST/$NOME"
@@ -41,7 +42,7 @@ chmod 600 "$DEST/$NOME"
 ELENCO=$(docker run --rm --network none -v "$DEST":/out postgres:17 pg_restore --list "/out/$NOME")
 echo "File: $DEST/$NOME ($(stat -f %z "$DEST/$NOME") byte), impronta in $NOME.sha256"
 echo "Archivio leggibile: voci $(echo "$ELENCO" | grep -c '^[0-9]') | tabelle con dati $(echo "$ELENCO" | grep -c ' TABLE DATA ')"
-for t in "auth users" "public profili" "public tesserati" "public adesioni" "public foto" "storage objects"; do
+for t in "auth users" "public profili" "public tesserati" "public adesioni" "public foto" "storage objects" "registrazione richieste"; do
   echo "  dati di ${t/ /.}: $(echo "$ELENCO" | grep -c " TABLE DATA ${t% *} ${t#* } ")"
 done
 echo "Avvisi di pg_dump: $(grep -c . "$DEST/$NOME.registro" || true) righe (vedi $NOME.registro)"
