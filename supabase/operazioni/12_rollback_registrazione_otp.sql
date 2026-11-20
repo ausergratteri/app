@@ -44,6 +44,9 @@ drop function if exists public.registrazione_manuale_consentita(text, text);
 drop function if exists public.registrazione_prenota(uuid, text);
 drop function if exists public.registrazione_elimina_attesa(uuid, text, uuid);
 drop function if exists public.registrazione_conferma(uuid, text, uuid);
+-- Strumenti del presidente (20261125): usano lo schema registrazione
+drop function if exists public.imposta_email_tesserato(uuid, text);
+drop function if exists public.annulla_registrazione(uuid);
 drop schema if exists registrazione cascade;   -- anche registrazione.ha_dati e le colonne della prenotazione
 
 commit;

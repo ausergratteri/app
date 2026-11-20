@@ -14,7 +14,8 @@
 #      profili, PIN e dati invariati, migrazione ripetibile, test, rollback identico
 #   9. registrazione con OTP dall'inizio alla fine: logica della funzione server (Node) + SQL vero
 #  10. registrazione con OTP: prenotazioni, eliminazioni e conferme simultanee → ne passa una sola
-#  (1, 2 e 8 includono anche il minimo privilegio sulle tabelle, migrazione 20261124)
+#  (1, 2 e 8 includono anche il minimo privilegio sulle tabelle, migrazione 20261124, e gli
+#   strumenti del presidente: e-mail dei tesserati e azzeramento del primo accesso, 20261125)
 # I riferimenti di confronto sono commit fissi (main oggi contiene già le correzioni):
 #   BASE_REF            schema prima di tutte le correzioni di sicurezza
 #   CONFRONTO_REF       schema prima della correzione dei posti
@@ -54,7 +55,7 @@ scenario() {  # nome file...
 
 echo "== 1. Installazione nuova (supabase/schema.sql)"
 scenario nuovo $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql $T/20_test_accessi.sql $T/25_test_posti.sql \
-  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
+  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/1.txt") PASS, $(grep -c '^FAIL' "$TMP/1.txt" || true) FAIL"
 
 echo "== 2. Database esistente ($BASE) + migrazione"
@@ -62,8 +63,8 @@ scenario migrato $T/00_stub_supabase.sql "$TMP/schema_vecchio.sql" $T/10_dati_pr
   supabase/migrations/20261118_sicurezza_accessi.sql supabase/migrations/20261119_importa_tesserati.sql \
   supabase/migrations/20261120_foto_private.sql supabase/migrations/20261121_permessi_foto_ruoli.sql \
   supabase/migrations/20261122_correzioni_retest.sql supabase/migrations/20261123_registrazione_otp.sql \
-  supabase/migrations/20261124_minimo_privilegio_tabelle.sql $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
-  $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
+  supabase/migrations/20261124_minimo_privilegio_tabelle.sql supabase/migrations/20261125_strumenti_presidente.sql $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
+  $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/2.txt") PASS, $(grep -c '^FAIL' "$TMP/2.txt" || true) FAIL"
 
 echo "== 3. Controllo: schema di $BASE senza correzioni (qui i FAIL sono attesi)"
@@ -182,6 +183,9 @@ FUNZ8="select md5(string_agg(p.proname || pg_get_function_identity_arguments(p.o
   M9=supabase/migrations/20261124_minimo_privilegio_tabelle.sql
   q otp < "$M9" >/dev/null && q otp < "$M9" >/dev/null && echo "PASS|migrazione 20261124: eseguita due volte senza errori" || echo "FAIL|migrazione 20261124: errore"
   q otp < $T/48_test_minimo_privilegio.sql | grep -E '^(PASS|FAIL)'
+  M10=supabase/migrations/20261125_strumenti_presidente.sql
+  q otp < "$M10" >/dev/null && q otp < "$M10" >/dev/null && echo "PASS|migrazione 20261125: eseguita due volte senza errori" || echo "FAIL|migrazione 20261125: errore"
+  q otp < $T/49_test_strumenti_presidente.sql | grep -E '^(PASS|FAIL)'
   q otp < supabase/operazioni/12_rollback_registrazione_otp.sql >/dev/null
   esito6 "$funz_prima" "$(echo "$FUNZ8" | q otp)" "rollback 20261123: funzioni identiche a prima della migrazione"
   [ "$(echo "select to_regnamespace('registrazione') is null" | q otp)" = "t" ] && echo "PASS|rollback 20261123: schema registrazione tolto" || echo "FAIL|rollback 20261123: schema registrazione ancora presente"

@@ -760,6 +760,7 @@ function vSoci() {
         ${pres && r === "socio" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="direttivo">Nel direttivo</button>` : ""}
         ${pres && r === "direttivo" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Togli dal direttivo</button>` : ""}
         ${r !== "presidente" && (pres || r !== "direttivo") ? `<button class="btn ghost sm" data-act="pin" data-id="${p.id}">Nuovo PIN</button>` : ""}
+        ${pres && r !== "presidente" && p.id !== S.myId ? `<button class="btn ghost sm" data-act="azzera-accesso" data-id="${p.id}">Azzera primo accesso</button>` : ""}
       </div></div>`).join("") : '<div class="empty">Nessuna richiesta.</div>'}</div></div>`;
   }).join("") + vTesserati() + `<p class="meta" style="margin:0">Chi non usa lo smartphone non serve registrarlo: lo aggiungi direttamente tra i partecipanti di ogni gita.</p>`;
 }
@@ -770,12 +771,15 @@ function vTesserati() {
   const ts = [...(S.tesserati || [])].sort((a, b) => a.nome.localeCompare(b.nome));
   const dentro = ts.filter(t => registrati.has(soloCifre(t.telefono)));
   const fuori = ts.filter(t => !registrati.has(soloCifre(t.telefono)));
-  const riga = t => `<div class="prow"><div class="who"><span class="n">${esc(t.nome)}</span><small>${esc(t.telefono || "senza telefono")}${t.numero_tessera ? " · tessera " + esc(t.numero_tessera) : ""}${t.email ? " · " + esc(t.email) : ""}</small></div>
-    <button class="btn ghost sm" data-act="togli-tesserato" data-id="${t.id}" aria-label="Togli ${esc(t.nome)} dall'elenco">Togli</button></div>`;
+  const pres = can("presidente");
+  const riga = (t, togli = true) => `<div class="prow"><div class="who"><span class="n">${esc(t.nome)}</span><small>${esc(t.telefono || "senza telefono")}${t.numero_tessera ? " · tessera " + esc(t.numero_tessera) : ""}${t.email ? " · " + esc(t.email) : ""}</small></div>
+    ${pres ? `<button class="btn ghost sm" data-act="email-tesserato" data-id="${t.id}" aria-label="E-mail di ${esc(t.nome)}">E-mail</button>` : ""}
+    ${togli ? `<button class="btn ghost sm" data-act="togli-tesserato" data-id="${t.id}" aria-label="Togli ${esc(t.nome)} dall'elenco">Togli</button>` : ""}</div>`;
   return `<div class="box"><h3>Tesserati ${new Date().getFullYear()} · ${ts.length}</h3>
     <p class="meta" style="margin:0">Chi si registra con il numero che è in questo elenco entra subito come socio, senza aspettare l'approvazione.</p>
     <div class="stats" style="grid-template-columns:1fr 1fr"><div class="stat"><b>${dentro.length}</b><span>già nell'app</span></div><div class="stat"><b>${fuori.length}</b><span>da invitare</span></div></div>
-    ${fuori.length ? `<details><summary class="link" style="display:inline-block">Chi non si è ancora registrato</summary><div class="plist" style="margin-top:8px">${fuori.map(riga).join("")}</div></details>` : ""}
+    ${fuori.length ? `<details><summary class="link" style="display:inline-block">Chi non si è ancora registrato</summary><div class="plist" style="margin-top:8px">${fuori.map(t => riga(t)).join("")}</div></details>` : ""}
+    ${pres && dentro.length ? `<details><summary class="link" style="display:inline-block">Già nell'app (e-mail)</summary><div class="plist" style="margin-top:8px">${dentro.map(t => riga(t, false)).join("")}</div></details>` : ""}
     <form id="fTess" class="box" style="padding:12px">
       <b>Aggiungi un tesserato</b>
       <div class="two"><label class="f">Nome e cognome<input type="text" id="tsNome" required></label><label class="f">Telefono<input type="tel" id="tsTel" inputmode="tel"></label></div>
@@ -890,6 +894,24 @@ function formPin(id) {
     ev.preventDefault();
     if (await safe(() => api.rpc("reimposta_pin", {utente: id, pin: $("#pPin").value.trim()}), "PIN cambiato")) openView("soci");
   });
+}
+
+/* ---------- E-mail di un tesserato (solo presidente: il database lo controlla) ----------
+   È l'indirizzo a cui arriva il codice del primo accesso, non quello con cui si entra. */
+function formEmailTesserato(id) {
+  const t = (S.tesserati || []).find(x => x.id === id) || {};
+  sheet("E-mail del tesserato", `<form id="fEmailTess"><p style="margin:0">E-mail di <b>${esc(t.nome || "")}</b>: lì arriverà il codice per il primo accesso. Lascia vuoto per toglierla.</p>
+    <label class="f">E-mail<input type="email" id="etEmail" autocomplete="off" maxlength="254" value="${esc(t.email || "")}"></label>
+    <p class="err" id="etErr" role="alert"></p>
+    <button class="btn sun block" type="submit">Salva l'e-mail</button></form>`);
+  $("#fEmailTess").addEventListener("submit", ev => { ev.preventDefault(); salvaEmailTesserato(id, $("#etEmail").value); });
+}
+async function salvaEmailTesserato(id, valore) {
+  const email = String(valore || "").trim().toLowerCase(), out = m => { const e = $("#etErr"); if (e) e.textContent = m; };
+  if (email && !emailValida(email)) return out("Controlla l'indirizzo e-mail.");
+  const condivisa = email && (S.tesserati || []).some(x => x.id !== id && String(x.email || "").toLowerCase() === email);
+  if (await safe(() => api.rpc("imposta_email_tesserato", {p_tesserato: id, p_email: email}),
+                 condivisa ? "E-mail salvata (la usa anche un altro tesserato)" : "E-mail salvata")) openView("soci", null, true);
 }
 
 /* ---------- Ognuno può cambiare il proprio PIN ---------- */
@@ -1322,6 +1344,9 @@ document.addEventListener("click", async ev => {
     case "rifiuta": if (!conferma("Tocca di nuovo per rifiutare")) return;
       if (await safe(() => api.del("profili", id), "Richiesta rifiutata")) openView("soci"); return;
     case "pin": return formPin(id);
+    case "email-tesserato": return formEmailTesserato(id);
+    case "azzera-accesso": if (!conferma("Tocca di nuovo per azzerare")) return;
+      if (await safe(() => api.rpc("annulla_registrazione", {p_utente: id}), "Primo accesso azzerato: ora può rifarlo con il codice")) openView("soci"); return;
     case "mio-pin": return formMioPin();
     case "importa": return formImporta();
     case "imp-report": if (IMP && IMP.esito) scaricaReportImport(); return;

@@ -142,9 +142,9 @@ function supabaseFinto(dati) {
       async signOut() { st.sessione = null; emetti("SIGNED_OUT", null); return {error: null}; }
     },
     from: query,
-    async rpc(fn) {
+    async rpc(fn, args) {
       if (st.pausa) await st.pausa;
-      st.richieste.push({tipo: "rpc", fn});
+      st.richieste.push({tipo: "rpc", fn, args});
       if (fn === "conteggi") return {data: [], error: null};
       return {data: null, error: null};
     },
