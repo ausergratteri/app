@@ -343,7 +343,9 @@ function vAccesso() {
         <button class="btn sun block" type="submit">Entra</button>
         <p class="meta" style="margin:0">Hai dimenticato il PIN? Chiedi al direttivo: te ne dà uno nuovo.</p>
       </form>` : vRegistrazione()}
-    </div></div>`;
+    </div>
+    <p class="meta" style="margin:0;text-align:center"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a></p>
+    </div>`;
 }
 
 async function entra(ev) {
@@ -403,6 +405,7 @@ function vRegistrazione() {
   const manuale = '<button class="btn ghost sm" type="button" data-act="reg-manuale">Non ho un\'e-mail registrata: chiedo al direttivo</button>';
   if (r.passo === "codice") return `<form id="fRegCodice">
       <p class="meta" style="margin:0">${esc(r.messaggio || "")}</p>
+      <p class="meta" style="margin:0">Non trovi l'e-mail? Guarda anche nella cartella <b>Spam</b> (Posta indesiderata) e, se è lì, segnala il messaggio come “non spam”.</p>
       <label class="f">Codice di 6 cifre<input type="text" id="rCodice" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
       ${err}
       <button class="btn sun block" type="submit">Controlla il codice</button>
@@ -426,6 +429,7 @@ function vRegistrazione() {
       <label class="f">Ripeti il PIN<input type="password" id="rmPin2" inputmode="numeric" autocomplete="new-password" minlength="6" maxlength="12" required></label>
       ${err}
       <button class="btn sun block" type="submit">Invia la richiesta</button>
+      <p class="meta" style="margin:0">Proseguendo confermi di aver letto l'<a href="privacy.html" target="_blank" rel="noopener">informativa privacy</a>.</p>
       <button class="btn ghost sm" type="button" data-act="reg-ricomincia">Torna indietro</button>
     </form>`;
   if (r.passo === "inviata") return `<div><p>${esc(r.messaggio || "")}</p>
@@ -438,6 +442,7 @@ function vRegistrazione() {
       ${err}
       <button class="btn sun block" type="submit">Ricevi il codice</button>
       <p class="meta" style="margin:0">Se sei tesserato e l'associazione ha il tuo indirizzo e-mail, ti mandiamo lì un codice di 6 cifre. Il numero serve solo per entrare: non riceverai messaggi sul telefono.</p>
+      <p class="meta" style="margin:0">Proseguendo confermi di aver letto l'<a href="privacy.html" target="_blank" rel="noopener">informativa privacy</a>.</p>
       ${manuale}
     </form>`;
 }
@@ -535,7 +540,8 @@ function vHome() {
     ${posts.length ? posts.map(postCard).join("") : '<div class="empty">Nessun avviso per ora.</div>'}</section>
   ${ultimeFoto()}
   ${soc.length ? `<section class="sec"><div class="sechead"><h2>Seguici</h2></div><div class="social">${soc.map(([k,l,ic]) => `<a class="sbtn" href="${esc(linkSicuro(c[k]))}" target="_blank" rel="noopener">${ic}${l}</a>`).join("")}</div></section>` : ""}
-  <section class="sec"><div class="row"><button class="btn ghost" data-act="mio-pin">Cambia il mio PIN</button><button class="btn ghost" data-act="esci">Esci dall'app</button></div></section>`;
+  <section class="sec"><div class="row"><button class="btn ghost" data-act="mio-pin">Cambia il mio PIN</button><button class="btn ghost" data-act="esci">Esci dall'app</button></div>
+    <p class="meta" style="margin:0"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a> · per i tuoi dati personali rivolgiti al direttivo</p></section>`;
 }
 
 function vAttivita() {
