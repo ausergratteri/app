@@ -69,15 +69,15 @@ end $$;
 -- =====================================================================
 -- 1. Registrazione dei soci
 -- =====================================================================
-call t.verifica('registrazione: il primo iscritto è presidente', null, 'select 1',
+call t.verifica('registrazione: il presidente nominato dall''amministratore resta presidente', null, 'select 1',
   $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000001') = 'presidente'$c$);
-call t.verifica('registrazione: tesserato con il suo numero entra come socio', null, 'select 1',
+call t.verifica('registrazione: account di un tesserato registrato prima dell''OTP resta socio', null, 'select 1',
   $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000003') = 'socio'$c$);
 call t.verifica('registrazione: numero non tesserato resta in attesa', null, 'select 1',
   $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-000000000004') = 'in_attesa'$c$);
-call t.verifica('registrazione: un nuovo tesserato entra ancora come socio', null,
+call t.verifica('registrazione: un tesserato che si registra da solo (senza OTP) resta in attesa', null,
   $x$insert into auth.users (id, email, raw_user_meta_data) values ('00000000-0000-0000-0000-0000000000a1', '3334444444@soci.ausergratteri.app', '{"nome":"Giovanni","telefono":"3334444444"}')$x$,
-  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a1') = 'socio'$c$);
+  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a1') = 'in_attesa'$c$);
 call t.verifica('registrazione: telefono di un tesserato solo nei metadata NON dà il ruolo socio', null,
   $x$insert into auth.users (id, email, raw_user_meta_data) values ('00000000-0000-0000-0000-0000000000a2', 'attaccante@example.com', '{"nome":"X","telefono":"3334444444"}')$x$,
   $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a2') = 'in_attesa'$c$);
@@ -87,10 +87,22 @@ call t.verifica('registrazione: email interna con un numero e metadata con un al
 call t.verifica('registrazione: numero già usato da un profilo (con prefisso 39) NON dà il ruolo socio', null,
   $x$insert into auth.users (id, email, raw_user_meta_data) values ('00000000-0000-0000-0000-0000000000a4', '393331111111@soci.ausergratteri.app', '{"nome":"Doppione"}')$x$,
   $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a4') = 'in_attesa'$c$);
-call t.verifica('registrazione: se non c''è un presidente il nuovo iscritto lo diventa (avvio)', null,
+call t.verifica('registrazione: senza presidente ma con altri profili il nuovo iscritto NON diventa presidente', null,
   $x$update public.profili set ruolo = 'socio' where ruolo = 'presidente';
      insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000a5', '3335555555@soci.ausergratteri.app')$x$,
-  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a5') = 'presidente'$c$);
+  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a5') = 'in_attesa'$c$);
+call t.verifica('registrazione: database vuoto, il primo iscritto NON diventa presidente (resta in attesa)', null,
+  $x$delete from public.profili;
+     insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000a7', '3337777777@soci.ausergratteri.app')$x$,
+  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a7') = 'in_attesa'$c$);
+call t.verifica('registrazione: database vuoto, nemmeno con metadati falsi si diventa presidente', null,
+  $x$delete from public.profili;
+     insert into auth.users (id, email, raw_user_meta_data) values ('00000000-0000-0000-0000-0000000000a8', '3337777778@soci.ausergratteri.app', '{"ruolo":"presidente","role":"presidente"}')$x$,
+  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000a8') = 'in_attesa'$c$);
+call t.prova('profili: chi è in attesa non si nomina presidente → negato', '00000000-0000-0000-0000-000000000004',
+  $x$update public.profili set ruolo = 'presidente' where id = auth.uid()$x$, 'negato');
+call t.prova('profili: un utente non crea profili a mano → negato', '00000000-0000-0000-0000-000000000004',
+  $x$insert into public.profili (id, nome, telefono, ruolo) values (gen_random_uuid(), 'X', '3330000001', 'presidente')$x$, 'negato');
 call t.verifica('registrazione: il nome viene troncato a 80 caratteri', null,
   $x$insert into auth.users (id, email, raw_user_meta_data) values ('00000000-0000-0000-0000-0000000000a6', '3336666666@soci.ausergratteri.app', jsonb_build_object('nome', repeat('x', 500)))$x$,
   $c$(select length(nome) from public.profili where id = '00000000-0000-0000-0000-0000000000a6') = 80$c$);

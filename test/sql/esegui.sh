@@ -10,6 +10,12 @@
 #      dati invariati, migrazione rieseguibile, blocco con regole sconosciute, rollback
 #   7. correzioni del retest Strix (20261122): adesioni per ruolo, tema, bucket senza SVG;
 #      stesse verifiche dello scenario 6 sullo schema oggi in produzione (c083fc1)
+#   8. registrazione con OTP (20261123) sullo schema oggi in produzione (59be38f): account,
+#      profili, PIN e dati invariati, migrazione ripetibile, test, rollback identico
+#   9. registrazione con OTP dall'inizio alla fine: logica della funzione server (Node) + SQL vero
+#  10. registrazione con OTP: prenotazioni, eliminazioni e conferme simultanee → ne passa una sola
+#  (1, 2 e 8 includono anche il minimo privilegio sulle tabelle, migrazione 20261124, e gli
+#   strumenti del presidente: e-mail dei tesserati e azzeramento del primo accesso, 20261125)
 # I riferimenti di confronto sono commit fissi (main oggi contiene già le correzioni):
 #   BASE_REF            schema prima di tutte le correzioni di sicurezza
 #   CONFRONTO_REF       schema prima della correzione dei posti
@@ -20,11 +26,20 @@ IMMAGINE="${PG_IMAGE:-postgres:16-alpine}"
 BASE="${BASE_REF:-1951fbe}"
 PRIMA_PERMESSI="${PRIMA_PERMESSI_REF:-055c922}"
 PRIMA_RETEST="${PRIMA_RETEST_REF:-c083fc1}"
+PRIMA_OTP="${PRIMA_OTP_REF:-59be38f}"
 NOME="auser-test-sql-$$"
 TMP="$(mktemp -d)"
 
+# Pulizia anche in caso di errore o interruzione: container E volume anonimo dei dati (-v).
+# (docker rm -f senza -v anticipa la rimozione automatica di --rm e lascerebbe il volume.)
+pulisci() {
+  docker rm -fv "$NOME" >/dev/null 2>&1 || true
+  rm -rf "$TMP"
+  if docker ps -aq --filter "name=^$NOME\$" | grep -q .; then echo "ATTENZIONE: container $NOME non rimosso" >&2; fi
+}
+trap pulisci EXIT
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 docker run -d --rm --name "$NOME" --network none -e POSTGRES_HOST_AUTH_METHOD=trust "$IMMAGINE" >/dev/null
-trap 'docker rm -f "$NOME" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 for _ in $(seq 60); do
   docker logs "$NOME" 2>&1 | grep -q "init process complete" && docker exec "$NOME" pg_isready -U postgres -q && break
   sleep 1
@@ -40,16 +55,16 @@ scenario() {  # nome file...
 
 echo "== 1. Installazione nuova (supabase/schema.sql)"
 scenario nuovo $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql $T/20_test_accessi.sql $T/25_test_posti.sql \
-  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
+  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/1.txt") PASS, $(grep -c '^FAIL' "$TMP/1.txt" || true) FAIL"
 
 echo "== 2. Database esistente ($BASE) + migrazione"
 scenario migrato $T/00_stub_supabase.sql "$TMP/schema_vecchio.sql" $T/10_dati_prova.sql $T/15_dati_rovinati.sql \
   supabase/migrations/20261118_sicurezza_accessi.sql supabase/migrations/20261119_importa_tesserati.sql \
   supabase/migrations/20261120_foto_private.sql supabase/migrations/20261121_permessi_foto_ruoli.sql \
-  supabase/migrations/20261122_correzioni_retest.sql \
-  $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
-  $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
+  supabase/migrations/20261122_correzioni_retest.sql supabase/migrations/20261123_registrazione_otp.sql \
+  supabase/migrations/20261124_minimo_privilegio_tabelle.sql supabase/migrations/20261125_strumenti_presidente.sql $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
+  $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/2.txt") PASS, $(grep -c '^FAIL' "$TMP/2.txt" || true) FAIL"
 
 echo "== 3. Controllo: schema di $BASE senza correzioni (qui i FAIL sono attesi)"
@@ -149,8 +164,70 @@ q retest_prima < $T/46_test_correzioni_retest.sql > "$TMP/7b.txt" || true
 echo "     $(grep -c '^PASS' "$TMP/7b.txt" || true) PASS, $(grep -c '^FAIL' "$TMP/7b.txt" || true) FAIL (difetti trovati)"
 grep '^FAIL' "$TMP/7b.txt" | cut -d'|' -f2 | sed 's/^/       - /' || true
 
-if grep -q '^FAIL' "$TMP/1.txt" "$TMP/2.txt" "$TMP/4.txt" "$TMP/5.txt" "$TMP/6.txt" "$TMP/7.txt" || ! grep -q '^PASS' "$TMP/1.txt" || ! grep -q '^PASS' "$TMP/2.txt" \
-   || ! grep -q '^PASS' "$TMP/4.txt" || ! grep -q '^PASS' "$TMP/5.txt" || ! grep -q '^PASS' "$TMP/6.txt" || ! grep -q '^PASS' "$TMP/7.txt"; then
+echo "== 8. Registrazione con OTP: schema in produzione ($PRIMA_OTP) + 20261123"
+git show "$PRIMA_OTP:supabase/schema.sql" > "$TMP/schema_otp.sql"
+M8=supabase/migrations/20261123_registrazione_otp.sql
+DATI8="select md5(coalesce((select string_agg(u.id::text || u.email || coalesce(u.encrypted_password, ''), '|' order by u.id) from auth.users u), '') || coalesce((select string_agg(p::text, '|' order by p.id) from public.profili p), '') || coalesce((select string_agg(x::text, '|' order by x.id) from public.tesserati x), '') || coalesce((select string_agg(a::text, '|' order by a.id) from public.adesioni a), '') || coalesce((select string_agg(f::text, '|' order by f.id) from public.foto f), ''))"
+FUNZ8="select md5(string_agg(p.proname || pg_get_function_identity_arguments(p.oid) || md5(p.prosrc), '|' order by p.proname, pg_get_function_identity_arguments(p.oid))) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname in ('public', 'registrazione')"
+{
+  for db in otp otp_prima; do
+    docker exec "$NOME" createdb -U postgres "$db"
+    cat $T/00_stub_supabase.sql "$TMP/schema_otp.sql" $T/10_dati_prova.sql $T/20_test_accessi.sql | q "$db" >/dev/null
+  done
+  echo "update auth.users set encrypted_password = 'impronta-pin-' || id where encrypted_password is null;" | q otp >/dev/null
+  dati_prima=$(echo "$DATI8" | q otp); funz_prima=$(echo "$FUNZ8" | q otp)
+  q otp < "$M8" && q otp < "$M8" && echo "PASS|migrazione 20261123: eseguita due volte senza errori" || echo "FAIL|migrazione 20261123: errore"
+  esito6 "$dati_prima" "$(echo "$DATI8" | q otp)" "migrazione 20261123: account, PIN, profili, tesserati, adesioni e foto invariati"
+  [ "$funz_prima" != "$(echo "$FUNZ8" | q otp)" ] && echo "PASS|migrazione 20261123: funzioni cambiate" || echo "FAIL|migrazione 20261123: nulla è cambiato"
+  q otp < $T/47_test_registrazione_otp.sql | grep -E '^(PASS|FAIL)'
+  M9=supabase/migrations/20261124_minimo_privilegio_tabelle.sql
+  q otp < "$M9" >/dev/null && q otp < "$M9" >/dev/null && echo "PASS|migrazione 20261124: eseguita due volte senza errori" || echo "FAIL|migrazione 20261124: errore"
+  q otp < $T/48_test_minimo_privilegio.sql | grep -E '^(PASS|FAIL)'
+  M10=supabase/migrations/20261125_strumenti_presidente.sql
+  q otp < "$M10" >/dev/null && q otp < "$M10" >/dev/null && echo "PASS|migrazione 20261125: eseguita due volte senza errori" || echo "FAIL|migrazione 20261125: errore"
+  q otp < $T/49_test_strumenti_presidente.sql | grep -E '^(PASS|FAIL)'
+  q otp < supabase/operazioni/12_rollback_registrazione_otp.sql >/dev/null
+  esito6 "$funz_prima" "$(echo "$FUNZ8" | q otp)" "rollback 20261123: funzioni identiche a prima della migrazione"
+  [ "$(echo "select to_regnamespace('registrazione') is null" | q otp)" = "t" ] && echo "PASS|rollback 20261123: schema registrazione tolto" || echo "FAIL|rollback 20261123: schema registrazione ancora presente"
+} > "$TMP/8.txt"
+grep -v '^PASS' "$TMP/8.txt" || true
+echo "   $(grep -c '^PASS' "$TMP/8.txt") PASS, $(grep -c '^FAIL' "$TMP/8.txt" || true) FAIL"
+echo "   controllo: schema in produzione senza 20261123 (qui il difetto è atteso)"
+ruolo_prima=$(printf "%s\n" "update public.tesserati set email = 'g@esempio.it' where nome = 'Giovanni Bianchi';" \
+  "insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000f8', '3334444444@soci.ausergratteri.app');" \
+  "select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000f8';" | q otp_prima | tail -1)
+echo "     registrazione diretta con il telefono di un tesserato, senza OTP: ruolo = $ruolo_prima (difetto se \"socio\")"
+
+echo "== 9. Registrazione con OTP dall'inizio alla fine: logica della funzione server + database vero"
+docker exec "$NOME" createdb -U postgres e2e
+cat $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql | q e2e >/dev/null
+node $T/registrazione_e2e.mjs "$NOME" e2e > "$TMP/9.txt" 2>&1 || true
+grep -v '^PASS' "$TMP/9.txt" || true
+# Database nuovo: chi si registra non diventa presidente; lo nomina l'amministratore (operazioni/14)
+docker exec "$NOME" createdb -U postgres nuovo_vuoto
+cat $T/00_stub_supabase.sql supabase/schema.sql | q nuovo_vuoto >/dev/null
+echo "insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000e1', '3331230001@soci.ausergratteri.app'), ('00000000-0000-0000-0000-0000000000e2', '3331230002@soci.ausergratteri.app');" | q nuovo_vuoto >/dev/null
+[ "$(echo "select string_agg(ruolo, ',' order by telefono) from public.profili;" | q nuovo_vuoto)" = "in_attesa,in_attesa" ] \
+  && echo "PASS|database nuovo: i primi iscritti restano in attesa (nessun presidente automatico)" >> "$TMP/9.txt" \
+  || echo "FAIL|database nuovo: qualcuno è diventato presidente registrandosi" >> "$TMP/9.txt"
+sed "s/3XXXXXXXXX/3331230001/" supabase/operazioni/14_nomina_primo_presidente.sql | q nuovo_vuoto >/dev/null
+[ "$(echo "select ruolo from public.profili where telefono = '3331230001';" | q nuovo_vuoto)" = "presidente" ] \
+  && echo "PASS|database nuovo: l'amministratore nomina il primo presidente (operazioni/14)" >> "$TMP/9.txt" \
+  || echo "FAIL|database nuovo: nomina del primo presidente non riuscita" >> "$TMP/9.txt"
+out14=$(sed "s/3XXXXXXXXX/3331230002/" supabase/operazioni/14_nomina_primo_presidente.sql | q nuovo_vuoto || true)
+echo "$out14" | grep -q "Esiste già un presidente" && [ "$(echo "select ruolo from public.profili where telefono = '3331230002';" | q nuovo_vuoto)" = "in_attesa" ] \
+  && echo "PASS|database nuovo: un secondo presidente non si nomina (lo script si ferma)" >> "$TMP/9.txt" \
+  || echo "FAIL|database nuovo: lo script ha nominato un secondo presidente" >> "$TMP/9.txt"
+echo "   $(grep -c '^PASS' "$TMP/9.txt") PASS, $(grep -c '^FAIL' "$TMP/9.txt" || true) FAIL"
+
+echo "== 10. Registrazione con OTP: richieste simultanee sullo stesso gettone e sullo stesso account"
+docker exec "$NOME" createdb -U postgres concorrenza_otp
+cat $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql | docker exec -i -e PGOPTIONS="-c client_min_messages=warning" "$NOME" psql -U postgres -d concorrenza_otp -v ON_ERROR_STOP=1 -q -X >/dev/null
+bash $T/concorrenza_otp.sh "$NOME" concorrenza_otp > "$TMP/10.txt" 2>&1 || true
+sed 's/^/   /' "$TMP/10.txt"
+
+if grep -q '^FAIL' "$TMP/1.txt" "$TMP/2.txt" "$TMP/4.txt" "$TMP/5.txt" "$TMP/6.txt" "$TMP/7.txt" "$TMP/8.txt" "$TMP/9.txt" "$TMP/10.txt" || [ "$(grep -c '^PASS' "$TMP/10.txt")" != 3 ] || ! grep -q '^PASS' "$TMP/9.txt" || ! grep -q '^PASS' "$TMP/1.txt" || ! grep -q '^PASS' "$TMP/2.txt" \
+   || ! grep -q '^PASS' "$TMP/4.txt" || ! grep -q '^PASS' "$TMP/5.txt" || ! grep -q '^PASS' "$TMP/6.txt" || ! grep -q '^PASS' "$TMP/7.txt" || ! grep -q '^PASS' "$TMP/8.txt"; then
   echo "ESITO: test SQL NON superati"; exit 1
 fi
 echo "ESITO: test SQL superati"

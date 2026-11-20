@@ -8,7 +8,11 @@ insert into auth.users (id, email, raw_user_meta_data) values
   ('00000000-0000-0000-0000-000000000002', '3332222222@soci.ausergratteri.app', '{"nome":"Salvo Direttivo","telefono":"3332222222"}'),
   ('00000000-0000-0000-0000-000000000003', '3331111111@soci.ausergratteri.app', '{"nome":"Maria Rossi","telefono":"333 111 1111"}'),
   ('00000000-0000-0000-0000-000000000004', '3333333333@soci.ausergratteri.app', '{"nome":"Concetta Attesa","telefono":"3333333333"}');
+-- Presidente nominato dall'amministratore (dal 20261123 nessuno lo diventa registrandosi)
+update public.profili set ruolo = 'presidente' where id = '00000000-0000-0000-0000-000000000001';
 update public.profili set ruolo = 'direttivo' where id = '00000000-0000-0000-0000-000000000002';
+-- Maria (S) è un account creato prima della registrazione con OTP: è già socia
+update public.profili set ruolo = 'socio' where id = '00000000-0000-0000-0000-000000000003';
 
 insert into auth.sessions (user_id) values
   ('00000000-0000-0000-0000-000000000002'), ('00000000-0000-0000-0000-000000000003'), ('00000000-0000-0000-0000-000000000003');

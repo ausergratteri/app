@@ -29,7 +29,7 @@ const S = {
   myId: null, myName: "", realRole: "lettore", viewRole: "lettore",
   att: {}, ass: {}, ades: [], cont: {}, post: {}, cfg: {}, profili: [],
   foto: [], bvista: "avvisi", temaScelto: null, anno: {}, pagina: {},
-  tab: "home", filtro: "tutte", loading: true, note: "", sheet: null, authTab: "entra"
+  tab: "home", filtro: "tutte", loading: true, note: "", sheet: null, authTab: "entra", reg: null
 };
 const ROLES = {presidente: "Presidente", direttivo: "Direttivo", socio: "Socio", lettore: "In attesa"};
 const RANK = {lettore: 0, socio: 1, direttivo: 2, presidente: 3};
@@ -342,15 +342,7 @@ function vAccesso() {
         <p class="err" id="lErr" role="alert"></p>
         <button class="btn sun block" type="submit">Entra</button>
         <p class="meta" style="margin:0">Hai dimenticato il PIN? Chiedi al direttivo: te ne dà uno nuovo.</p>
-      </form>` : `<form id="fReg">
-        <label class="f">Nome e cognome<input type="text" id="rNome" autocomplete="name" required></label>
-        <label class="f">Numero di telefono<input type="tel" id="rTel" autocomplete="tel" inputmode="tel" required></label>
-        <label class="f">Scegli un PIN <span class="h">Almeno 6 cifre, facile da ricordare per te</span><input type="password" id="rPin" inputmode="numeric" autocomplete="new-password" minlength="6" required></label>
-        <label class="f">Ripeti il PIN<input type="password" id="rPin2" inputmode="numeric" autocomplete="new-password" minlength="6" required></label>
-        <p class="err" id="rErr" role="alert"></p>
-        <button class="btn sun block" type="submit">Registrati</button>
-        <p class="meta" style="margin:0">Se sei tesserato e usi il numero che hai dato all'Auser, entri subito. Altrimenti il direttivo conferma che sei socio. Il numero serve solo per entrare: non riceverai messaggi.</p>
-      </form>`}
+      </form>` : vRegistrazione()}
     </div></div>`;
 }
 
@@ -363,17 +355,144 @@ async function entra(ev) {
   if (error) $("#lErr").textContent = "Numero o PIN non corretti. Se non ti sei mai registrato, scegli “Primo accesso”.";
 }
 
-async function registrati(ev) {
+/* ---------- Registrazione con codice via e-mail ----------
+   1. nome, cognome e telefono → se è un tesserato con e-mail in anagrafica, la funzione
+      server manda un codice di 6 cifre a QUELL'indirizzo (l'app non lo vede e non lo chiede);
+   2. codice → 3. PIN → account "socio". Senza e-mail in anagrafica: richiesta al direttivo.
+   Le risposte non dicono mai se un numero è di un tesserato. */
+const PIN_OK = p => /^\d{6,12}$/.test(p);
+const MSG_REG = {
+  dati_non_validi: "Controlla nome, cognome e numero di telefono.",
+  troppe_richieste: "Troppe richieste in poco tempo: riprova tra un'ora.",
+  scaduto: "Il codice è scaduto: chiedine uno nuovo.",
+  bloccato: "Troppi tentativi con questo codice: chiedine uno nuovo più tardi.",
+  non_valido: "Questa richiesta non è più valida: ricomincia da capo.",
+  gia_registrato: "Questo numero è già registrato: scegli “Entra”. Se non ricordi il PIN, chiedi al direttivo.",
+  non_completabile: "Non è stato possibile completare la registrazione: chiedi al direttivo.",
+  pin_non_valido: "Il PIN deve avere da 6 a 12 cifre.",
+  errore: "Il servizio non risponde: riprova tra poco.",
+  rete: "Il servizio non risponde: controlla la connessione e riprova.",
+  non_disponibile: "La registrazione non è disponibile in questo momento: riprova più tardi o chiedi al direttivo."
+};
+const msgReg = r => r.esito === "errato"
+  ? `Codice non corretto. ${r.tentativi_rimasti > 0 ? "Tentativi rimasti: " + r.tentativi_rimasti + "." : ""}`.trim()
+  : (MSG_REG[r.esito] || MSG_REG.errore);
+
+async function funzioneRegistrazione(dati) {
+  if (!S.live) return registrazioneProva(dati);
+  try {
+    const r = await fetch(String(CFG.url || "").replace(/\/+$/, "") + "/functions/v1/registrazione", {
+      method: "POST", headers: {"Content-Type": "application/json", apikey: CFG.chiave || ""}, body: JSON.stringify(dati)
+    });
+    let corpo = {};
+    try { corpo = await r.json(); } catch (e) {}
+    return {stato: r.status, ...corpo};
+  } catch (e) { return {stato: 0, esito: "rete"}; }
+}
+// Modalità prova: nessun servizio, il codice è sempre 123456
+function registrazioneProva(d) {
+  if (d.azione === "avvia") return {stato: 200, esito: "ok", richiesta: "prova", messaggio: "Modalità prova: il codice è 123456."};
+  if (d.azione === "verifica") return d.codice === "123456" ? {stato: 200, esito: "ok", gettone: "prova"} : {stato: 400, esito: "errato", tentativi_rimasti: 4};
+  if (d.azione === "completa") return {stato: 200, esito: "ok", prova: true};
+  return {stato: 200, esito: "ricevuta", messaggio: "Modalità prova: richiesta non inviata."};
+}
+
+function vRegistrazione() {
+  const r = S.reg || {passo: "dati"};
+  const err = '<p class="err" id="rErr" role="alert"></p>';
+  const manuale = '<button class="btn ghost sm" type="button" data-act="reg-manuale">Non ho un\'e-mail registrata: chiedo al direttivo</button>';
+  if (r.passo === "codice") return `<form id="fRegCodice">
+      <p class="meta" style="margin:0">${esc(r.messaggio || "")}</p>
+      <label class="f">Codice di 6 cifre<input type="text" id="rCodice" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
+      ${err}
+      <button class="btn sun block" type="submit">Controlla il codice</button>
+      <div class="row"><button class="btn ghost sm" type="button" data-act="reg-reinvia">Mandami un nuovo codice</button>
+      <button class="btn ghost sm" type="button" data-act="reg-ricomincia">Ricomincia</button></div>
+      ${manuale}
+    </form>`;
+  if (r.passo === "pin") return `<form id="fRegPin">
+      <p class="meta" style="margin:0">Codice corretto. Ora scegli il PIN che userai per entrare.</p>
+      <label class="f">Scegli un PIN <span class="h">Da 6 a 12 cifre, facile da ricordare per te</span><input type="password" id="rPin" inputmode="numeric" autocomplete="new-password" minlength="6" maxlength="12" required></label>
+      <label class="f">Ripeti il PIN<input type="password" id="rPin2" inputmode="numeric" autocomplete="new-password" minlength="6" maxlength="12" required></label>
+      ${err}
+      <button class="btn sun block" type="submit">Completa la registrazione</button>
+    </form>`;
+  if (r.passo === "manuale") return `<form id="fRegManuale">
+      <p class="meta" style="margin:0">Il direttivo controllerà i tuoi dati e confermerà la registrazione. Nel frattempo potrai entrare, ma vedrai le attività solo dopo la conferma.</p>
+      <label class="f">Nome<input type="text" id="rmNome" autocomplete="given-name" maxlength="80" required value="${esc(r.nome || "")}"></label>
+      <label class="f">Cognome<input type="text" id="rmCognome" autocomplete="family-name" maxlength="80" required value="${esc(r.cognome || "")}"></label>
+      <label class="f">Numero di telefono<input type="tel" id="rmTel" autocomplete="tel" inputmode="tel" required value="${esc(r.tel || "")}"></label>
+      <label class="f">Scegli un PIN <span class="h">Da 6 a 12 cifre</span><input type="password" id="rmPin" inputmode="numeric" autocomplete="new-password" minlength="6" maxlength="12" required></label>
+      <label class="f">Ripeti il PIN<input type="password" id="rmPin2" inputmode="numeric" autocomplete="new-password" minlength="6" maxlength="12" required></label>
+      ${err}
+      <button class="btn sun block" type="submit">Invia la richiesta</button>
+      <button class="btn ghost sm" type="button" data-act="reg-ricomincia">Torna indietro</button>
+    </form>`;
+  if (r.passo === "inviata") return `<div><p>${esc(r.messaggio || "")}</p>
+      <p class="meta">Se il numero era già registrato, usa “Entra” con il tuo PIN o chiedi al direttivo un PIN nuovo.</p>
+      <button class="btn sun block" type="button" data-act="authtab" data-v="entra">Vai a “Entra”</button></div>`;
+  return `<form id="fReg">
+      <label class="f">Nome<input type="text" id="rNome" autocomplete="given-name" maxlength="80" required value="${esc(r.nome || "")}"></label>
+      <label class="f">Cognome<input type="text" id="rCognome" autocomplete="family-name" maxlength="80" required value="${esc(r.cognome || "")}"></label>
+      <label class="f">Numero di telefono <span class="h">Quello che hai dato all'Auser</span><input type="tel" id="rTel" autocomplete="tel" inputmode="tel" required value="${esc(r.tel || "")}"></label>
+      ${err}
+      <button class="btn sun block" type="submit">Ricevi il codice</button>
+      <p class="meta" style="margin:0">Se sei tesserato e l'associazione ha il tuo indirizzo e-mail, ti mandiamo lì un codice di 6 cifre. Il numero serve solo per entrare: non riceverai messaggi sul telefono.</p>
+      ${manuale}
+    </form>`;
+}
+
+async function regAvvia(nome, cognome, tel) {
+  const out = m => { const e = $("#rErr"); if (e) e.textContent = m; };
+  if (!nome || !cognome) return out("Scrivi nome e cognome.");
+  if (soloCifre(tel).length < 6) return out("Controlla il numero di telefono.");
+  out("Invio la richiesta…");
+  const r = await funzioneRegistrazione({azione: "avvia", nome, cognome, telefono: tel});
+  if (r.esito !== "ok" || !r.richiesta) return out(msgReg(r));
+  S.reg = {passo: "codice", richiesta: r.richiesta, nome, cognome, tel, messaggio: r.messaggio || ""};
+  render();
+}
+async function regCodice(ev) {
   ev.preventDefault();
-  const nome = $("#rNome").value.trim(), tel = soloCifre($("#rTel").value), pin = $("#rPin").value;
-  const out = m => $("#rErr").textContent = m;
-  if (tel.length < 6) return out("Controlla il numero di telefono.");
-  if (pin.length < 6) return out("Il PIN deve avere almeno 6 cifre.");
+  const codice = ($("#rCodice").value || "").replace(/\D/g, ""), out = m => $("#rErr").textContent = m;
+  if (codice.length !== 6) return out("Il codice ha 6 cifre.");
+  out("Controllo…");
+  const r = await funzioneRegistrazione({azione: "verifica", richiesta: S.reg && S.reg.richiesta, codice});
+  if (r.esito !== "ok" || !r.gettone) return out(msgReg(r));
+  S.reg = {...S.reg, passo: "pin", gettone: r.gettone};
+  render();
+}
+async function regPin(ev) {
+  ev.preventDefault();
+  const pin = $("#rPin").value, out = m => $("#rErr").textContent = m;
+  if (!PIN_OK(pin)) return out(MSG_REG.pin_non_valido);
   if (pin !== $("#rPin2").value) return out("I due PIN non sono uguali.");
-  out("Registro…");
-  const {data, error} = await S.sb.auth.signUp({email: emailDaTel(tel), password: pin, options: {data: {nome, telefono: tel}}});
-  if (error) return out(/registered|already/i.test(error.message) ? "Questo numero è già registrato: scegli “Entra”." : "Registrazione non riuscita: " + error.message);
-  if (!data.session) return out("Registrazione ricevuta, ma Supabase chiede la conferma via email: il presidente deve disattivarla (vedi istruzioni).");
+  out("Completo la registrazione…");
+  const reg = S.reg || {};
+  const r = await funzioneRegistrazione({azione: "completa", richiesta: reg.richiesta, gettone: reg.gettone, pin});
+  if (r.esito !== "ok") { if (r.esito === "non_valido") S.reg = {...reg, passo: "dati", gettone: null}; return out(msgReg(r)); }
+  S.reg = null;
+  if (r.prova) { toast("Modalità prova: registrazione simulata."); S.authTab = "entra"; return render(); }
+  const {error} = await S.sb.auth.signInWithPassword({email: emailDaTel(reg.tel), password: pin});
+  if (error) { S.authTab = "entra"; render(); toast("Registrazione completata: ora entra con il tuo numero e il PIN."); }
+}
+async function regManuale(ev) {
+  ev.preventDefault();
+  const nome = $("#rmNome").value.trim(), cognome = $("#rmCognome").value.trim(), tel = $("#rmTel").value, pin = $("#rmPin").value;
+  const out = m => $("#rErr").textContent = m;
+  if (!nome || !cognome) return out("Scrivi nome e cognome.");
+  if (soloCifre(tel).length < 6) return out("Controlla il numero di telefono.");
+  if (!PIN_OK(pin)) return out(MSG_REG.pin_non_valido);
+  if (pin !== $("#rmPin2").value) return out("I due PIN non sono uguali.");
+  out("Invio la richiesta…");
+  const r = await funzioneRegistrazione({azione: "manuale", nome, cognome, telefono: tel, pin});
+  if (r.esito !== "ricevuta") return out(msgReg(r));
+  if (S.live) {
+    const {error} = await S.sb.auth.signInWithPassword({email: emailDaTel(tel), password: pin});
+    if (!error) { S.reg = null; return; }
+  }
+  S.reg = {passo: "inviata", messaggio: r.messaggio || ""};
+  render();
 }
 
 /* ---------- Card e pagine ---------- */
@@ -641,6 +760,7 @@ function vSoci() {
         ${pres && r === "socio" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="direttivo">Nel direttivo</button>` : ""}
         ${pres && r === "direttivo" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Togli dal direttivo</button>` : ""}
         ${r !== "presidente" && (pres || r !== "direttivo") ? `<button class="btn ghost sm" data-act="pin" data-id="${p.id}">Nuovo PIN</button>` : ""}
+        ${pres && r !== "presidente" && p.id !== S.myId ? `<button class="btn ghost sm" data-act="azzera-accesso" data-id="${p.id}">Azzera primo accesso</button>` : ""}
       </div></div>`).join("") : '<div class="empty">Nessuna richiesta.</div>'}</div></div>`;
   }).join("") + vTesserati() + `<p class="meta" style="margin:0">Chi non usa lo smartphone non serve registrarlo: lo aggiungi direttamente tra i partecipanti di ogni gita.</p>`;
 }
@@ -651,12 +771,15 @@ function vTesserati() {
   const ts = [...(S.tesserati || [])].sort((a, b) => a.nome.localeCompare(b.nome));
   const dentro = ts.filter(t => registrati.has(soloCifre(t.telefono)));
   const fuori = ts.filter(t => !registrati.has(soloCifre(t.telefono)));
-  const riga = t => `<div class="prow"><div class="who"><span class="n">${esc(t.nome)}</span><small>${esc(t.telefono || "senza telefono")}${t.numero_tessera ? " · tessera " + esc(t.numero_tessera) : ""}${t.email ? " · " + esc(t.email) : ""}</small></div>
-    <button class="btn ghost sm" data-act="togli-tesserato" data-id="${t.id}" aria-label="Togli ${esc(t.nome)} dall'elenco">Togli</button></div>`;
+  const pres = can("presidente");
+  const riga = (t, togli = true) => `<div class="prow"><div class="who"><span class="n">${esc(t.nome)}</span><small>${esc(t.telefono || "senza telefono")}${t.numero_tessera ? " · tessera " + esc(t.numero_tessera) : ""}${t.email ? " · " + esc(t.email) : ""}</small></div>
+    ${pres ? `<button class="btn ghost sm" data-act="email-tesserato" data-id="${t.id}" aria-label="E-mail di ${esc(t.nome)}">E-mail</button>` : ""}
+    ${togli ? `<button class="btn ghost sm" data-act="togli-tesserato" data-id="${t.id}" aria-label="Togli ${esc(t.nome)} dall'elenco">Togli</button>` : ""}</div>`;
   return `<div class="box"><h3>Tesserati ${new Date().getFullYear()} · ${ts.length}</h3>
     <p class="meta" style="margin:0">Chi si registra con il numero che è in questo elenco entra subito come socio, senza aspettare l'approvazione.</p>
     <div class="stats" style="grid-template-columns:1fr 1fr"><div class="stat"><b>${dentro.length}</b><span>già nell'app</span></div><div class="stat"><b>${fuori.length}</b><span>da invitare</span></div></div>
-    ${fuori.length ? `<details><summary class="link" style="display:inline-block">Chi non si è ancora registrato</summary><div class="plist" style="margin-top:8px">${fuori.map(riga).join("")}</div></details>` : ""}
+    ${fuori.length ? `<details><summary class="link" style="display:inline-block">Chi non si è ancora registrato</summary><div class="plist" style="margin-top:8px">${fuori.map(t => riga(t)).join("")}</div></details>` : ""}
+    ${pres && dentro.length ? `<details><summary class="link" style="display:inline-block">Già nell'app (e-mail)</summary><div class="plist" style="margin-top:8px">${dentro.map(t => riga(t, false)).join("")}</div></details>` : ""}
     <form id="fTess" class="box" style="padding:12px">
       <b>Aggiungi un tesserato</b>
       <div class="two"><label class="f">Nome e cognome<input type="text" id="tsNome" required></label><label class="f">Telefono<input type="tel" id="tsTel" inputmode="tel"></label></div>
@@ -771,6 +894,24 @@ function formPin(id) {
     ev.preventDefault();
     if (await safe(() => api.rpc("reimposta_pin", {utente: id, pin: $("#pPin").value.trim()}), "PIN cambiato")) openView("soci");
   });
+}
+
+/* ---------- E-mail di un tesserato (solo presidente: il database lo controlla) ----------
+   È l'indirizzo a cui arriva il codice del primo accesso, non quello con cui si entra. */
+function formEmailTesserato(id) {
+  const t = (S.tesserati || []).find(x => x.id === id) || {};
+  sheet("E-mail del tesserato", `<form id="fEmailTess"><p style="margin:0">E-mail di <b>${esc(t.nome || "")}</b>: lì arriverà il codice per il primo accesso. Lascia vuoto per toglierla.</p>
+    <label class="f">E-mail<input type="email" id="etEmail" autocomplete="off" maxlength="254" value="${esc(t.email || "")}"></label>
+    <p class="err" id="etErr" role="alert"></p>
+    <button class="btn sun block" type="submit">Salva l'e-mail</button></form>`);
+  $("#fEmailTess").addEventListener("submit", ev => { ev.preventDefault(); salvaEmailTesserato(id, $("#etEmail").value); });
+}
+async function salvaEmailTesserato(id, valore) {
+  const email = String(valore || "").trim().toLowerCase(), out = m => { const e = $("#etErr"); if (e) e.textContent = m; };
+  if (email && !emailValida(email)) return out("Controlla l'indirizzo e-mail.");
+  const condivisa = email && (S.tesserati || []).some(x => x.id !== id && String(x.email || "").toLowerCase() === email);
+  if (await safe(() => api.rpc("imposta_email_tesserato", {p_tesserato: id, p_email: email}),
+                 condivisa ? "E-mail salvata (la usa anche un altro tesserato)" : "E-mail salvata")) openView("soci", null, true);
 }
 
 /* ---------- Ognuno può cambiare il proprio PIN ---------- */
@@ -1175,7 +1316,10 @@ document.addEventListener("click", async ev => {
     case "anno": S.anno[t.dataset.k] = t.dataset.v; Object.keys(S.pagina).forEach(k => { if (k.startsWith(t.dataset.k)) S.pagina[k] = 1; }); render(); return;
     case "pagina": { const k = t.dataset.k; S.pagina[k] = Number(t.dataset.v); render();
       const sez = document.getElementById("sez-" + k); if (sez) sez.scrollIntoView({block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"}); return; }
-    case "authtab": S.authTab = t.dataset.v; render(); return;
+    case "authtab": S.authTab = t.dataset.v; S.reg = null; render(); return;
+    case "reg-manuale": S.reg = {passo: "manuale", nome: S.reg?.nome || $("#rNome")?.value || "", cognome: S.reg?.cognome || $("#rCognome")?.value || "", tel: S.reg?.tel || $("#rTel")?.value || ""}; render(); return;
+    case "reg-ricomincia": S.reg = {passo: "dati", nome: S.reg?.nome, cognome: S.reg?.cognome, tel: S.reg?.tel}; render(); return;
+    case "reg-reinvia": if (S.reg) return regAvvia(S.reg.nome, S.reg.cognome, S.reg.tel); return;
     case "open": return openView(t.dataset.k, id);
     case "big": { const liv = (zoomOra() + 1) % 3; impostaZoom(liv); try { localStorage.setItem("auser-zoom", String(liv)); } catch (e) {}
       toast(["Testo normale", "Testo grande", "Testo molto grande"][liv]); render(); return; }
@@ -1200,6 +1344,9 @@ document.addEventListener("click", async ev => {
     case "rifiuta": if (!conferma("Tocca di nuovo per rifiutare")) return;
       if (await safe(() => api.del("profili", id), "Richiesta rifiutata")) openView("soci"); return;
     case "pin": return formPin(id);
+    case "email-tesserato": return formEmailTesserato(id);
+    case "azzera-accesso": if (!conferma("Tocca di nuovo per azzerare")) return;
+      if (await safe(() => api.rpc("annulla_registrazione", {p_utente: id}), "Primo accesso azzerato: ora può rifarlo con il codice")) openView("soci"); return;
     case "mio-pin": return formMioPin();
     case "importa": return formImporta();
     case "imp-report": if (IMP && IMP.esito) scaricaReportImport(); return;
@@ -1241,7 +1388,10 @@ document.addEventListener("click", async ev => {
 });
 document.addEventListener("submit", async ev => {
   if (ev.target.id === "fLogin") entra(ev);
-  if (ev.target.id === "fReg") registrati(ev);
+  if (ev.target.id === "fReg") { ev.preventDefault(); regAvvia($("#rNome").value.trim(), $("#rCognome").value.trim(), $("#rTel").value); }
+  if (ev.target.id === "fRegCodice") regCodice(ev);
+  if (ev.target.id === "fRegPin") regPin(ev);
+  if (ev.target.id === "fRegManuale") regManuale(ev);
   if (ev.target.id === "fTess") {
     ev.preventDefault();
     const nome = $("#tsNome").value.trim(), telefono = soloCifre($("#tsTel").value);
@@ -1318,6 +1468,7 @@ function azzeraDatiSessione() {
   S._versioneCarica = (S._versioneCarica || 0) + 1;
   S.realRole = S.viewRole = "lettore";
   S.myId = null; S.myName = ""; S.profilo = null;
+  S.reg = null;  // stato della registrazione (contiene il gettone monouso)
   S.foto = []; S.fotoErrore = false; S.fotoScartate = 0;
   S._fotoDaFirmare = []; S._fotoFirmateAlle = 0;
   S.att = {}; S.ass = {}; S.ades = [];

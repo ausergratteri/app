@@ -52,6 +52,12 @@ function messaggioErrore(m) {
   if (/importare i tesserati/i.test(s)) return "Solo il presidente può importare i tesserati.";
   if (/cambiare il telefono/i.test(s)) return "Il numero di telefono può cambiarlo solo il presidente.";
   if (/nome di un'altra persona/i.test(s)) return "Il nome di un'altra persona può cambiarlo solo il presidente.";
+  if (/Solo il presidente può (cambiare l'e-mail|azzerare)/i.test(s)) return "Solo il presidente può farlo.";
+  if (/E-mail non valida/i.test(s)) return "Controlla l'indirizzo e-mail.";
+  if (/Ha già iscrizioni o foto/i.test(s)) return "Ha già iscrizioni o foto: non si può azzerare. Usa «Nuovo PIN».";
+  if (/tuo primo accesso/i.test(s)) return "Non puoi azzerare il tuo primo accesso.";
+  if (/primo accesso di un presidente/i.test(s)) return "Non si può azzerare il primo accesso di un presidente.";
+  if (/(Tesserato|Utente) non trovato/i.test(s)) return "Non l'ho trovato: riapri l'app e riprova.";
   return "";
 }
 

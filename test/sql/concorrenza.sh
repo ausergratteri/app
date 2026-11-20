@@ -13,6 +13,8 @@ insert into public.tesserati (nome, telefono) values ('Socio Uno', '3335550001')
 insert into auth.users (id, email) values
   ('00000000-0000-0000-0000-0000000000a1', '3335550001@soci.ausergratteri.app'),
   ('00000000-0000-0000-0000-0000000000a2', '3335550002@soci.ausergratteri.app');
+-- Soci già approvati (con la registrazione OTP un account nuovo nasce "in attesa")
+update public.profili set ruolo = 'socio' where id in ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000a2');
 insert into public.attivita (id, titolo, data, posti, ospiti, stato)
   values ('a0000000-0000-0000-0000-0000000000cc', 'Gita con 2 posti', current_date + 10, 2, true, 'aperta');
 SQL

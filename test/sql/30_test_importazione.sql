@@ -94,11 +94,11 @@ call t.prova('regole: email non valida inserita a mano → negato', :D,
   $x$insert into public.tesserati (nome, telefono, email) values ('X', '3330006666', 'non-una-email')$x$, 'negato');
 call t.prova('regole: due tesserati con lo stesso telefono → negato', :D,
   $x$insert into public.tesserati (nome, telefono) values ('Doppio', '+39 3334444444')$x$, 'negato');
-call t.verifica('registrazione: un tesserato importato si registra come prima', null,
+call t.verifica('registrazione: un tesserato importato che si registra senza OTP resta in attesa', null,
   $x$select set_config('request.jwt.claim.sub', '', true);
      insert into public.tesserati (nome, telefono, email, numero_tessera) values ('Importata', '3337770000', 'imp@example.it', '000300');
      insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000c1', '3337770000@soci.ausergratteri.app')$x$,
-  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000c1') = 'socio'$c$);
+  $c$(select ruolo from public.profili where id = '00000000-0000-0000-0000-0000000000c1') = 'in_attesa'$c$);
 
 \pset format unaligned
 \pset tuples_only on

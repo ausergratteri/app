@@ -3,16 +3,23 @@
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
   if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+  -- Come in Supabase: la chiave secret (service role) salta RLS; la usa solo la funzione server
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin bypassrls; end if;
 end $$;
 create schema auth;
 create schema storage;
 create schema extensions;
+-- Come nei progetti Supabase del 2026: le nuove tabelle di public ricevono per impostazione
+-- predefinita TRUNCATE, REFERENCES e TRIGGER per anon e authenticated (il DML no).
+alter default privileges in schema public grant truncate, references, trigger on tables to anon, authenticated;
 
 create table auth.users (
   id                 uuid primary key,
   email              text unique,
   raw_user_meta_data jsonb not null default '{}'::jsonb,
-  encrypted_password text
+  raw_app_meta_data  jsonb not null default '{}'::jsonb,   -- lo scrive solo l'API admin (service role)
+  encrypted_password text,
+  created_at         timestamptz not null default now()
 );
 create table auth.sessions (
   id      uuid primary key default gen_random_uuid(),
@@ -34,6 +41,7 @@ create table storage.objects (
   bucket_id text not null,
   name      text not null,
   owner     uuid default auth.uid(),
+  owner_id  text,
   metadata  jsonb   -- come in Supabase: {"size": ..., "eTag": "...", "mimetype": ...}
 );
 alter table storage.objects enable row level security;
