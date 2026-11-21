@@ -111,6 +111,7 @@ test("galleria: un SVG tra le foto non crea righe né file, le altre foto si pub
   const app = await avviaApp({utente: U.soc});
   const prima = app.sb.st.tabelle.foto.length;
   app.ctx.__files = [{name: "a.svg", type: "image/svg+xml", size: 100}, {name: "b.gif", type: "image/gif", size: 100}];
+  app.esegui("S.dichiaraFoto = true");
   await app.esegui('caricaFoto("g-passata", __files)');
   await app.calma();
   const caricati = app.sb.st.richieste.filter(r => r.tipo === "upload");

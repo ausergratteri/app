@@ -22,7 +22,7 @@
 
 export const MESSAGGIO_AVVIO =
   "Se i dati corrispondono a un socio con un indirizzo e-mail registrato presso l'associazione, " +
-  "riceverai un codice di 6 cifre. Il codice vale 10 minuti.";
+  "riceverai un codice di 6 cifre. Il codice vale 15 minuti.";
 export const MESSAGGIO_MANUALE =
   "Richiesta ricevuta. Il direttivo controllerà i tuoi dati e confermerà la registrazione.";
 
@@ -144,13 +144,13 @@ export function messaggioEmail(nome: string, codice: string): {oggetto: string; 
   const testo =
     `Gentile ${n || "socio"},\n\n` +
     `il tuo codice per completare la registrazione all'app dell'AUSER Gratteri è:\n\n    ${codice}\n\n` +
-    `Il codice vale 10 minuti e si può usare una sola volta.\n` +
+    `Il codice vale 15 minuti e si può usare una sola volta.\n` +
     `Se non hai chiesto tu di registrarti, ignora questo messaggio: senza il codice nessuno può usare i tuoi dati.\n\n` +
     `AUSER Gratteri`;
   const html =
     `<p>Gentile ${n || "socio"},</p><p>il tuo codice per completare la registrazione all'app dell'AUSER Gratteri è:</p>` +
     `<p style="font-size:28px;font-weight:bold;letter-spacing:6px">${codice}</p>` +
-    `<p>Il codice vale 10 minuti e si può usare una sola volta.</p>` +
+    `<p>Il codice vale 15 minuti e si può usare una sola volta.</p>` +
     `<p>Se non hai chiesto tu di registrarti, ignora questo messaggio: senza il codice nessuno può usare i tuoi dati.</p><p>AUSER Gratteri</p>`;
   return {oggetto: "Il tuo codice per l'app AUSER Gratteri", testo, html};
 }

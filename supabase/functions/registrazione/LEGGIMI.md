@@ -58,7 +58,7 @@ logica (limiti, codici, gettoni) e nel database (solo `service_role` esegue le f
 2. Nell'elenco dei tesserati: una voce di prova con un numero **mai registrato** e il proprio indirizzo
    (oppure, se si è già nell'elenco, controllare che il proprio indirizzo sia giusto).
 3. *Primo accesso* con nome, cognome e quel numero → arriva il codice → PIN → socio.
-4. Prove negative: codice sbagliato, codice scaduto (attendere 10 minuti), secondo uso del codice,
+4. Prove negative: codice sbagliato, codice scaduto (attendere 15 minuti), secondo uso del codice,
    numero non in elenco (stessa schermata, nessuna e-mail).
 5. Alla fine: togliere la voce di prova e il suo account (con autorizzazione), poi togliere
    `EMAIL_CONSENTITE` per aprire a tutti.

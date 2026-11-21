@@ -135,7 +135,7 @@ call t.caso('verifica: dopo 5 errori bloccata, anche con il codice giusto', $c$
   create temp table r1 on commit drop as select richiesta from t.avvia('Giovanni', 'Bianchi', '3334444444', '111111');
   select public.registrazione_verifica((select richiesta from r1), t.h('00000' || g)) from generate_series(1, 5) g;
   select t.vale(v.esito = 'bloccato' and v.token is null, v.esito) from public.registrazione_verifica((select richiesta from r1), t.h('111111')) v$c$);
-call t.caso('verifica: codice scaduto dopo 10 minuti', $c$
+call t.caso('verifica: codice rifiutato dopo la scadenza', $c$
   create temp table r1 on commit drop as select richiesta from t.avvia('Giovanni', 'Bianchi', '3334444444', '111111');
   update registrazione.richieste set otp_scade_il = now() - interval '1 second' where id = (select richiesta from r1);
   select t.vale(v.esito = 'scaduto' and v.token is null) from public.registrazione_verifica((select richiesta from r1), t.h('111111')) v$c$);

@@ -290,6 +290,14 @@ function testata(saluto, sotto, conRuolo) {
 function render() {
   // Non ancora entrato
   if (S.live && !S.sessione) { $("#tabs").innerHTML = ""; $("#app").innerHTML = testata("Benvenuto in Auser", cfg().motto || "L'app dei soci.", false) + vAccesso(); return; }
+  if (S.live && S.profilo?.ex_socio_dal) {
+    $("#tabs").innerHTML = "";
+    $("#app").innerHTML = testata("Accesso sospeso", "Il tesseramento risulta concluso.", false) +
+      `<main><div class="box"><p>Per rinnovare il tesseramento o per richieste sui tuoi dati, contatta il direttivo.</p>
+      <p><a href="privacy.html">Informativa privacy</a></p>
+      <button class="btn ghost" data-act="esci">Esci</button></div></main>`;
+    return;
+  }
   // Entrato ma non ancora approvato
   if (S.live && S.realRole === "lettore" && !S.loading) {
     $("#tabs").innerHTML = "";
@@ -343,7 +351,9 @@ function vAccesso() {
         <button class="btn sun block" type="submit">Entra</button>
         <p class="meta" style="margin:0">Hai dimenticato il PIN? Chiedi al direttivo: te ne dà uno nuovo.</p>
       </form>` : vRegistrazione()}
-    </div></div>`;
+    </div>
+    <p class="meta" style="margin:0;text-align:center"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a></p>
+    </div>`;
 }
 
 async function entra(ev) {
@@ -403,6 +413,7 @@ function vRegistrazione() {
   const manuale = '<button class="btn ghost sm" type="button" data-act="reg-manuale">Non ho un\'e-mail registrata: chiedo al direttivo</button>';
   if (r.passo === "codice") return `<form id="fRegCodice">
       <p class="meta" style="margin:0">${esc(r.messaggio || "")}</p>
+      <p class="meta" style="margin:0">Non trovi l'e-mail? Guarda anche nella cartella <b>Spam</b> (Posta indesiderata) e, se è lì, segnala il messaggio come “non spam”.</p>
       <label class="f">Codice di 6 cifre<input type="text" id="rCodice" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
       ${err}
       <button class="btn sun block" type="submit">Controlla il codice</button>
@@ -426,6 +437,7 @@ function vRegistrazione() {
       <label class="f">Ripeti il PIN<input type="password" id="rmPin2" inputmode="numeric" autocomplete="new-password" minlength="6" maxlength="12" required></label>
       ${err}
       <button class="btn sun block" type="submit">Invia la richiesta</button>
+      <p class="meta" style="margin:0">Proseguendo confermi di aver letto l'<a href="privacy.html" target="_blank" rel="noopener">informativa privacy</a>.</p>
       <button class="btn ghost sm" type="button" data-act="reg-ricomincia">Torna indietro</button>
     </form>`;
   if (r.passo === "inviata") return `<div><p>${esc(r.messaggio || "")}</p>
@@ -438,6 +450,7 @@ function vRegistrazione() {
       ${err}
       <button class="btn sun block" type="submit">Ricevi il codice</button>
       <p class="meta" style="margin:0">Se sei tesserato e l'associazione ha il tuo indirizzo e-mail, ti mandiamo lì un codice di 6 cifre. Il numero serve solo per entrare: non riceverai messaggi sul telefono.</p>
+      <p class="meta" style="margin:0">Proseguendo confermi di aver letto l'<a href="privacy.html" target="_blank" rel="noopener">informativa privacy</a>.</p>
       ${manuale}
     </form>`;
 }
@@ -527,7 +540,7 @@ function vHome() {
   const posts = Object.values(S.post).sort((a, b) => (b.data || "").localeCompare(a.data || "")).slice(0, 2);
   const c = cfg();
   const soc = [["facebook","Facebook",I.fb],["instagram","Instagram",I.ig],["whatsapp","WhatsApp",I.wa]].filter(([k]) => linkSicuro(c[k]));
-  return `
+  return `${domandaConsensoFoto()}
   <section class="sec" aria-label="Prossimo appuntamento"><div class="sechead"><h2>Prossimo appuntamento</h2></div>
     ${first ? hero(first) : '<div class="empty">Nessun appuntamento in programma.</div>'}</section>
   ${prossimi.length > 1 ? `<section class="sec"><div class="sechead"><h2>In programma</h2><button class="link" data-act="tab" data-v="attivita">Vedi tutte</button></div>${prossimi.slice(1, 4).map(card).join("")}</section>` : ""}
@@ -535,7 +548,42 @@ function vHome() {
     ${posts.length ? posts.map(postCard).join("") : '<div class="empty">Nessun avviso per ora.</div>'}</section>
   ${ultimeFoto()}
   ${soc.length ? `<section class="sec"><div class="sechead"><h2>Seguici</h2></div><div class="social">${soc.map(([k,l,ic]) => `<a class="sbtn" href="${esc(linkSicuro(c[k]))}" target="_blank" rel="noopener">${ic}${l}</a>`).join("")}</div></section>` : ""}
-  <section class="sec"><div class="row"><button class="btn ghost" data-act="mio-pin">Cambia il mio PIN</button><button class="btn ghost" data-act="esci">Esci dall'app</button></div></section>`;
+  <section class="sec"><div class="row"><button class="btn ghost" data-act="mio-pin">Cambia il mio PIN</button><button class="btn ghost" data-act="esci">Esci dall'app</button></div>
+    ${statoConsensoFoto()}
+    <p class="meta" style="margin:0"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a> · per i tuoi dati personali rivolgiti al direttivo</p></section>`;
+}
+
+/* Consenso alle foto (GDPR): lo dà o lo revoca solo il socio, per sé; ogni scelta resta nello storico */
+const consensoFoto = () => S.profilo ? S.profilo.consenso_foto : undefined;  // true · false · null (non risposto)
+function domandaConsensoFoto() {
+  if (!S.live || !S.profilo || !can("socio") || consensoFoto() !== null) return "";
+  return `<section class="sec" aria-label="Consenso alle foto"><div class="box">
+    <h3>Le foto delle attività</h3>
+    <p style="margin:0">Nella galleria riservata ai soci pubblichiamo le foto delle gite e delle feste. <b>Acconsenti a comparire nelle foto?</b></p>
+    <p class="meta" style="margin:0">È una tua libera scelta: l'app funziona allo stesso modo. Puoi cambiare idea quando vuoi, in fondo a questa pagina.</p>
+    <div class="row"><button class="btn sun" data-act="consenso-foto" data-v="si">Sì, acconsento</button><button class="btn ghost" data-act="consenso-foto" data-v="no">No</button></div>
+    <p class="meta" style="margin:0"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a></p>
+  </div></section>`;
+}
+function statoConsensoFoto() {
+  if (!S.live || !S.profilo || !can("socio")) return "";
+  const c = consensoFoto();
+  if (c !== true && c !== false) return "";  // non ancora risposto (o database senza la migrazione 20261126)
+  const d = S.profilo.consenso_foto_il ? new Date(S.profilo.consenso_foto_il) : null;
+  const quando = d && !isNaN(d) ? " il " + d.toLocaleDateString("it-IT", {day: "numeric", month: "long", year: "numeric"}) : "";
+  return `<div class="row" style="align-items:center"><p class="meta" style="margin:0;flex:1">Foto delle attività: ${c ? `hai dato il consenso${quando}` : `non hai dato il consenso${quando}`}.</p>
+    <button class="btn ghost sm" data-act="consenso-foto" data-v="${c ? "no" : "si"}">${c ? "Revoca il consenso" : "Dai il consenso"}</button></div>`;
+}
+async function impostaConsensoFoto(si) {
+  const utente = S.myId;
+  try {
+    const {data, error} = await S.sb.rpc("imposta_consenso_foto", {p_consenso: si});
+    if (error || data !== "ok") throw error || new Error("risposta inattesa");
+  } catch (e) { console.error(e); toast("Non sono riuscito a salvare la tua scelta. Riprova."); return; }
+  if (S.myId !== utente || !S.profilo) return;
+  S.profilo.consenso_foto = si; S.profilo.consenso_foto_il = new Date().toISOString();
+  render();
+  toast(si ? "Grazie: consenso alle foto registrato." : "Scelta registrata: non comparirai nelle foto pubblicate.");
 }
 
 function vAttivita() {
@@ -749,19 +797,21 @@ function vAssemblea(a) {
 /* ---------- Soci e ruoli ---------- */
 function vSoci() {
   const pres = can("presidente");
-  const gruppi = [["in_attesa","Da approvare"],["direttivo","Direttivo"],["socio","Soci"],["presidente","Presidente"]];
+  const gruppi = [["in_attesa","Da approvare"],["direttivo","Direttivo"],["socio","Soci"],["presidente","Presidente"],["ex_socio","Ex soci"]];
   return gruppi.map(([r, t]) => {
-    const ps = S.profili.filter(p => p.ruolo === r);
-    if (!ps.length && r !== "in_attesa") return "";
+    const ps = S.profili.filter(p => (p.ex_socio_dal ? "ex_socio" : p.ruolo) === r);
+    if (!ps.length && r !== "in_attesa" && r !== "ex_socio") return "";
     return `<div class="box"><h3>${t} · ${ps.length}</h3><div class="plist">${ps.length ? ps.map(p => `
-      <div class="prow col"><div class="who"><span class="n">${esc(p.nome || "Senza nome")}</span><small>${esc(p.telefono)}</small></div>
+      <div class="prow col"><div class="who"><span class="n">${esc(p.nome || "Senza nome")}</span><small>${esc(p.telefono)}${r !== "in_attesa" && "consenso_foto" in p ? ` · foto: ${p.consenso_foto === true ? "sì" : p.consenso_foto === false ? "no" : "non ha risposto"}` : ""}${p.ex_socio_dal ? " · dal " + esc(fmtLongY(p.ex_socio_dal.slice(0, 10))) : ""}</small></div>
       <div class="row">
         ${r === "in_attesa" ? `<button class="btn sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Approva</button><button class="btn danger sm" data-act="rifiuta" data-id="${p.id}">Rifiuta</button>` : ""}
         ${pres && r === "socio" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="direttivo">Nel direttivo</button>` : ""}
         ${pres && r === "direttivo" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Togli dal direttivo</button>` : ""}
-        ${r !== "presidente" && (pres || r !== "direttivo") ? `<button class="btn ghost sm" data-act="pin" data-id="${p.id}">Nuovo PIN</button>` : ""}
-        ${pres && r !== "presidente" && p.id !== S.myId ? `<button class="btn ghost sm" data-act="azzera-accesso" data-id="${p.id}">Azzera primo accesso</button>` : ""}
-      </div></div>`).join("") : '<div class="empty">Nessuna richiesta.</div>'}</div></div>`;
+        ${pres && S.live && "ex_socio_dal" in p && ["socio", "direttivo"].includes(r) ? `<button class="btn ghost sm" data-act="ex-socio" data-id="${p.id}">Sposta in Ex soci</button>` : ""}
+        ${pres && r === "ex_socio" ? `<button class="btn ghost sm" data-act="riattiva-socio" data-id="${p.id}">Riattiva come socio</button>` : ""}
+        ${r !== "presidente" && r !== "ex_socio" && (pres || r !== "direttivo") ? `<button class="btn ghost sm" data-act="pin" data-id="${p.id}">Nuovo PIN</button>` : ""}
+        ${pres && r !== "presidente" && r !== "ex_socio" && p.id !== S.myId ? `<button class="btn ghost sm" data-act="azzera-accesso" data-id="${p.id}">Azzera primo accesso</button>` : ""}
+      </div></div>`).join("") : `<div class="empty">${r === "ex_socio" ? "Nessun ex socio." : "Nessuna richiesta."}</div>`}</div></div>`;
   }).join("") + vTesserati() + `<p class="meta" style="margin:0">Chi non usa lo smartphone non serve registrarlo: lo aggiungi direttamente tra i partecipanti di ogni gita.</p>`;
 }
 
@@ -1177,7 +1227,9 @@ function thumb(f, eid, i) {
 }
 function bottoneCarica(eid) {
   if (!can("socio")) return "";
-  return `<label class="btn ghost block" style="cursor:pointer"><input type="file" accept="image/*" multiple class="sr" data-carica="${eid}">+ Aggiungi le tue foto</label>
+  const ok = !!S.dichiaraFoto;
+  return `<label class="check"><input type="checkbox" data-dichiara-foto style="flex:none" ${ok ? "checked" : ""}> <span>Confermo di avere il consenso delle persone riconoscibili in tutte le foto di questo caricamento e, per i minori, di chi esercita la responsabilità genitoriale.</span></label>
+    <label class="btn ghost block" style="cursor:${ok ? "pointer" : "not-allowed"};opacity:${ok ? 1 : .55}" data-carica-etichetta><input type="file" accept="image/*" multiple class="sr" data-carica="${eid}" ${ok ? "" : "disabled"}>+ Aggiungi le tue foto</label>
     <span class="meta" id="up-${eid}" aria-live="polite"></span>`;
 }
 function boxFoto(e) {
@@ -1214,9 +1266,18 @@ function ultimeFoto() {
   return `<section class="sec"><div class="sechead"><h2>Ultime foto</h2><button class="link" data-act="gallerie">Tutte le gallerie</button></div>
     <div class="grid3">${ult.map(f => thumb(f, f.attivita_id, fotoDi(f.attivita_id).indexOf(f))).join("")}</div></section>`;
 }
+function aggiornaDichiarazioneFoto(confermata) {
+  S.dichiaraFoto = confermata;
+  document.querySelectorAll("[data-dichiara-foto]").forEach(c => { c.checked = S.dichiaraFoto; });
+  document.querySelectorAll("[data-carica]").forEach(i => { i.disabled = !S.dichiaraFoto; });
+  document.querySelectorAll("[data-carica-etichetta]").forEach(l => { l.style.opacity = S.dichiaraFoto ? 1 : .55; l.style.cursor = S.dichiaraFoto ? "pointer" : "not-allowed"; });
+}
 async function caricaFoto(eid, files) {
+  if (!S.dichiaraFoto) { toast("Prima conferma che le persone nelle foto sono d'accordo."); return; }
   const max = can("direttivo") ? 100 : 20;
   const lista = [...files].slice(0, max), out = () => $("#up-" + eid);
+  if (!lista.length) return;
+  aggiornaDichiarazioneFoto(false);
   let ok = 0;
   const utente = S.myId;
   for (let i = 0; i < lista.length; i++) {
@@ -1226,7 +1287,7 @@ async function caricaFoto(eid, files) {
     try {
       // Le foto delle gallerie vanno nel bucket privato, senza URL pubblico
       r = await api.carica(lista[i], true, BKT_GAL);
-      await api.ins("foto", {attivita_id: eid, user_id: utente, autore: S.myName, url: S.live ? "" : r.url, percorso: r.percorso, bucket: r.bucket, didascalia: ""});
+      await api.ins("foto", {attivita_id: eid, user_id: utente, autore: S.myName, url: S.live ? "" : r.url, percorso: r.percorso, bucket: r.bucket, didascalia: "", consenso_dichiarato: true});
       ok++;
     } catch (e) {
       console.error(e);
@@ -1250,12 +1311,16 @@ function disegnaLB() {
   LB.i = (LB.i + fs.length) % fs.length;
   const f = fs[LB.i], e = trova(LB.eid);
   const puo = (f.user_id && f.user_id === S.myId) || can("direttivo");
+  const autoreRiservato = can("direttivo") && f.autore === "ex socio"
+    ? S.profili.find(p => p.id === f.user_id && p.ex_socio_dal)?.nome
+    : "";
   $("#lightbox").innerHTML = `<div class="lb" role="dialog" aria-modal="true" aria-label="Foto ${LB.i + 1} di ${fs.length}">
     <div class="lbtop"><span>${LB.i + 1} / ${fs.length}</span><button class="close" data-act="lb-chiudi">Chiudi</button></div>
     <div class="lbimg" id="lbimg">${fs.length > 1 ? '<button class="lbnav" data-act="lb-prev" aria-label="Foto precedente">‹</button>' : ""}
       <img src="${esc(f.url)}" alt="${esc(f.didascalia || "Foto: " + (e ? e.titolo : ""))}">
       ${fs.length > 1 ? '<button class="lbnav" data-act="lb-next" aria-label="Foto successiva">›</button>' : ""}</div>
     <div class="lbinfo"><b>${esc(e ? e.titolo : "")}</b>${f.didascalia ? `<p>${esc(f.didascalia)}</p>` : ""}<small>${f.autore ? "Foto di " + esc(f.autore) : ""}${fs.length > 1 ? " · scorri per le altre" : ""}</small>
+      ${autoreRiservato ? `<p class="meta">Caricata da ${esc(autoreRiservato)} · visibile al direttivo</p>` : ""}
       ${puo ? `<div class="row"><button class="btn ghost sm" data-act="lb-dida">${f.didascalia ? "Modifica didascalia" : "Aggiungi didascalia"}</button><button class="btn danger sm" data-act="lb-elimina" data-id="${f.id}">Elimina</button></div>
       <form id="fDida" hidden><input type="text" id="dida" value="${esc(f.didascalia)}" placeholder="Scrivi una didascalia" aria-label="Didascalia"><button class="btn sm" type="submit">Salva</button></form>` : ""}
     </div></div>`;
@@ -1326,6 +1391,7 @@ document.addEventListener("click", async ev => {
     case "role": return sceltaRuolo();
     case "setrole": S.viewRole = t.dataset.v; if (S.tab === "gestione" && !can("direttivo")) S.tab = "home"; closeSheet(); render(); return;
     case "esci": if (S.live) await S.sb.auth.signOut(); return;
+    case "consenso-foto": return impostaConsensoFoto(t.dataset.v === "si");
     case "ricarica": await caricaProfilo(); return;
     case "form-evento": return formEvento(id);
     case "form-assemblea": return formAssemblea(id);
@@ -1340,6 +1406,13 @@ document.addEventListener("click", async ev => {
     case "elimina": if (!conferma("Tocca di nuovo per eliminare")) return;
       if (await safe(() => api.del(t.dataset.tab, id), "Eliminato")) closeSheet(); return;
     case "soci": return openView("soci");
+    case "ex-socio": case "riattiva-socio": {
+      const uscita = a === "ex-socio";
+      if (!conferma(uscita ? "Conferma: revoca accesso" : "Conferma riattivazione")) return;
+      if (await safe(() => api.rpc("imposta_ex_socio", {p_utente: id, p_ex_socio: uscita}),
+        uscita ? "Spostato in Ex soci" : "Accesso riattivato come socio")) openView("soci");
+      return;
+    }
     case "ruolo": if (await safe(() => api.upd("profili", id, {ruolo: t.dataset.v}), t.dataset.v === "direttivo" ? "Aggiunto al direttivo" : "Fatto")) openView("soci"); return;
     case "rifiuta": if (!conferma("Tocca di nuovo per rifiutare")) return;
       if (await safe(() => api.del("profili", id), "Richiesta rifiutata")) openView("soci"); return;
@@ -1404,6 +1477,10 @@ document.addEventListener("keydown", ev => {
   if (ev.key === "Escape" && $("#sheet").innerHTML) closeSheet();
 });
 document.addEventListener("change", ev => {
+  if (ev.target.matches("[data-dichiara-foto]")) {
+    aggiornaDichiarazioneFoto(ev.target.checked);
+    return;
+  }
   const el = ev.target.closest("[data-carica]"); if (el && el.files.length) { caricaFoto(el.dataset.carica, el.files); el.value = ""; }
   if (ev.target.id === "impFile") return leggiFileImport(ev.target.files[0]);
   if (!IMP || !IMP.esito) return;
@@ -1411,7 +1488,27 @@ document.addEventListener("change", ev => {
   if (ev.target.dataset.impAgg) { const n = Number(ev.target.dataset.impAgg); if (ev.target.checked) IMP.aggiorna.add(n); else IMP.aggiorna.delete(n); return aggiornaBottoneImport(); }
   if (ev.target.id === "impVuoti") { IMP.completaVuoti = ev.target.checked; return aggiornaBottoneImport(); }
 });
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.live && RANK[S.realRole] >= 1) carica().catch(() => {}); });
+async function controllaAccessoSocio() {
+  const utente = S.sessione?.user?.id;
+  if (!S.live || !utente || RANK[S.realRole] < 1) return false;
+  // Su database precedenti la colonna non esiste ancora.
+  if (!S.profilo || !("ex_socio_dal" in S.profilo)) return true;
+  const {data, error} = await S.sb.from("profili").select("ex_socio_dal").eq("id", utente).maybeSingle();
+  if (S.sessione?.user?.id !== utente || RANK[S.realRole] < 1) return false;
+  if (error) return false;
+  if (data && !data.ex_socio_dal) return true;
+  azzeraDatiSessione();
+  closeSheet();
+  chiudiLB();
+  S.profilo = data;
+  S.loading = false;
+  render();
+  return false;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") controllaAccessoSocio().then(ok => ok && carica()).catch(() => {});
+});
 
 
 // Rinnova soltanto gli URL delle foto, senza ricaricare tutto il database.
@@ -1457,7 +1554,7 @@ async function rinnovaFoto() {
 }
 
 // Controllo leggero ogni minuto; senza sessione non esegue richieste.
-setInterval(() => { rinnovaFoto().catch(console.error); }, 60 * 1000);
+setInterval(() => { controllaAccessoSocio().then(ok => ok && rinnovaFoto()).catch(console.error); }, 60 * 1000);
 
 /* =====================================================================
    Avvio
@@ -1467,7 +1564,7 @@ setInterval(() => { rinnovaFoto().catch(console.error); }, 60 * 1000);
 function azzeraDatiSessione() {
   S._versioneCarica = (S._versioneCarica || 0) + 1;
   S.realRole = S.viewRole = "lettore";
-  S.myId = null; S.myName = ""; S.profilo = null;
+  S.myId = null; S.myName = ""; S.profilo = null; S.dichiaraFoto = false;
   S.reg = null;  // stato della registrazione (contiene il gettone monouso)
   S.foto = []; S.fotoErrore = false; S.fotoScartate = 0;
   S._fotoDaFirmare = []; S._fotoFirmateAlle = 0;
@@ -1494,7 +1591,7 @@ async function caricaProfilo() {
   }
   S.profilo = data;
   S.myName = data?.nome || u.user_metadata?.nome || "";
-  const r = data?.ruolo;
+  const r = data?.ex_socio_dal ? null : data?.ruolo;
   S.realRole = r === "presidente" ? "presidente" : r === "direttivo" ? "direttivo" : r === "socio" ? "socio" : "lettore";
   S.viewRole = S.realRole;
   if (RANK[S.realRole] >= 1) { S.loading = true; render(); try { await carica(); } catch (e) { S.loading = false; S.note = "Non riesco a leggere i dati. Controlla la connessione e riapri l'app."; render(); } }

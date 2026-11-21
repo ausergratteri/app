@@ -52,7 +52,7 @@ test("avvia: l'e-mail va all'indirizzo dell'ANAGRAFICA, anche se il client ne ma
   assert.equal(st.email.length, 1);
   assert.equal(st.email[0].a, "giovanni@esempio.it");
   assert.match(st.email[0].testo, /482913/);
-  assert.match(st.email[0].testo, /10 minuti/);
+  assert.match(st.email[0].testo, /15 minuti/);
 });
 
 test("avvia: risposta IDENTICA per tesserato riconosciuto e non (anti-enumerazione)", async () => {
@@ -295,7 +295,7 @@ test("codice OTP: sempre 6 cifre, senza distorsioni dai valori alti", () => {
 test("messaggio e-mail: nome dell'anagrafica senza HTML, codice e scadenza presenti", () => {
   const m = messaggioEmail("<script>x</script>Rossi", "123456");
   assert.ok(!m.html.includes("<script>"));
-  assert.match(m.testo, /123456/); assert.match(m.html, /123456/); assert.match(m.testo, /10 minuti/);
+  assert.match(m.testo, /123456/); assert.match(m.html, /123456/); assert.match(m.testo, /15 minuti/);
 });
 
 // ---------- IP del client ----------

@@ -199,6 +199,7 @@ test("rinnovo fallito: dopo 55 minuti le foto spariscono, poi tornano quando Sto
 
 test("caricamento: le foto delle gallerie vanno nel bucket privato, senza URL pubblico", async () => {
   const app = await avviaApp({utente: U.soc});
+  app.esegui("S.dichiaraFoto = true");
   await app.esegui(`caricaFoto("g-passata", [${JSON.stringify(fileFinto())}])`);
   const up = app.sb.st.richieste.filter(r => r.tipo === "upload");
   assert.equal(up.length, 1);
@@ -217,6 +218,7 @@ test("caricamento: le foto delle gallerie vanno nel bucket privato, senza URL pu
 test("caricamento: se la riga non si salva, il file appena caricato viene tolto", async () => {
   const app = await avviaApp({utente: U.soc});
   app.sb.st.inserimentoRotto = true;
+  app.esegui("S.dichiaraFoto = true");
   await app.esegui(`caricaFoto("g-passata", [${JSON.stringify(fileFinto())}])`);
   const up = app.sb.st.richieste.find(r => r.tipo === "upload");
   const rm = app.sb.st.richieste.find(r => r.tipo === "remove");
@@ -238,6 +240,7 @@ test("caricamento di più foto: se si esce a metà, le altre non vengono caricat
     return x;
   };
   const tre = JSON.stringify([fileFinto("a.jpg"), fileFinto("b.jpg"), fileFinto("c.jpg")]);
+  app.esegui("S.dichiaraFoto = true");
   const carica = app.esegui(`caricaFoto("g-passata", ${tre})`);
   await new Promise(r => setTimeout(r, 10));
   await app.sb.comandi.esci();
