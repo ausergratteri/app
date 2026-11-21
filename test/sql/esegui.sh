@@ -55,7 +55,7 @@ scenario() {  # nome file...
 
 echo "== 1. Installazione nuova (supabase/schema.sql)"
 scenario nuovo $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql $T/20_test_accessi.sql $T/25_test_posti.sql \
-  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
+  $T/30_test_importazione.sql $T/40_test_foto_private.sql $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql $T/55_test_consenso_foto.sql | tee "$TMP/1.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/1.txt") PASS, $(grep -c '^FAIL' "$TMP/1.txt" || true) FAIL"
 
 echo "== 2. Database esistente ($BASE) + migrazione"
@@ -63,8 +63,8 @@ scenario migrato $T/00_stub_supabase.sql "$TMP/schema_vecchio.sql" $T/10_dati_pr
   supabase/migrations/20261118_sicurezza_accessi.sql supabase/migrations/20261119_importa_tesserati.sql \
   supabase/migrations/20261120_foto_private.sql supabase/migrations/20261121_permessi_foto_ruoli.sql \
   supabase/migrations/20261122_correzioni_retest.sql supabase/migrations/20261123_registrazione_otp.sql \
-  supabase/migrations/20261124_minimo_privilegio_tabelle.sql supabase/migrations/20261125_strumenti_presidente.sql $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
-  $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
+  supabase/migrations/20261124_minimo_privilegio_tabelle.sql supabase/migrations/20261125_strumenti_presidente.sql supabase/migrations/20261126_consenso_foto.sql $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
+  $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql $T/55_test_consenso_foto.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/2.txt") PASS, $(grep -c '^FAIL' "$TMP/2.txt" || true) FAIL"
 
 echo "== 3. Controllo: schema di $BASE senza correzioni (qui i FAIL sono attesi)"

@@ -532,7 +532,7 @@ function vHome() {
   const posts = Object.values(S.post).sort((a, b) => (b.data || "").localeCompare(a.data || "")).slice(0, 2);
   const c = cfg();
   const soc = [["facebook","Facebook",I.fb],["instagram","Instagram",I.ig],["whatsapp","WhatsApp",I.wa]].filter(([k]) => linkSicuro(c[k]));
-  return `
+  return `${domandaConsensoFoto()}
   <section class="sec" aria-label="Prossimo appuntamento"><div class="sechead"><h2>Prossimo appuntamento</h2></div>
     ${first ? hero(first) : '<div class="empty">Nessun appuntamento in programma.</div>'}</section>
   ${prossimi.length > 1 ? `<section class="sec"><div class="sechead"><h2>In programma</h2><button class="link" data-act="tab" data-v="attivita">Vedi tutte</button></div>${prossimi.slice(1, 4).map(card).join("")}</section>` : ""}
@@ -541,7 +541,41 @@ function vHome() {
   ${ultimeFoto()}
   ${soc.length ? `<section class="sec"><div class="sechead"><h2>Seguici</h2></div><div class="social">${soc.map(([k,l,ic]) => `<a class="sbtn" href="${esc(linkSicuro(c[k]))}" target="_blank" rel="noopener">${ic}${l}</a>`).join("")}</div></section>` : ""}
   <section class="sec"><div class="row"><button class="btn ghost" data-act="mio-pin">Cambia il mio PIN</button><button class="btn ghost" data-act="esci">Esci dall'app</button></div>
+    ${statoConsensoFoto()}
     <p class="meta" style="margin:0"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a> · per i tuoi dati personali rivolgiti al direttivo</p></section>`;
+}
+
+/* Consenso alle foto (GDPR): lo dà o lo revoca solo il socio, per sé; ogni scelta resta nello storico */
+const consensoFoto = () => S.profilo ? S.profilo.consenso_foto : undefined;  // true · false · null (non risposto)
+function domandaConsensoFoto() {
+  if (!S.live || !S.profilo || !can("socio") || consensoFoto() !== null) return "";
+  return `<section class="sec" aria-label="Consenso alle foto"><div class="box">
+    <h3>Le foto delle attività</h3>
+    <p style="margin:0">Nella galleria riservata ai soci pubblichiamo le foto delle gite e delle feste. <b>Acconsenti a comparire nelle foto?</b></p>
+    <p class="meta" style="margin:0">È una tua libera scelta: l'app funziona allo stesso modo. Puoi cambiare idea quando vuoi, in fondo a questa pagina.</p>
+    <div class="row"><button class="btn sun" data-act="consenso-foto" data-v="si">Sì, acconsento</button><button class="btn ghost" data-act="consenso-foto" data-v="no">No</button></div>
+    <p class="meta" style="margin:0"><a href="privacy.html" target="_blank" rel="noopener">Informativa privacy</a></p>
+  </div></section>`;
+}
+function statoConsensoFoto() {
+  if (!S.live || !S.profilo || !can("socio")) return "";
+  const c = consensoFoto();
+  if (c !== true && c !== false) return "";  // non ancora risposto (o database senza la migrazione 20261126)
+  const d = S.profilo.consenso_foto_il ? new Date(S.profilo.consenso_foto_il) : null;
+  const quando = d && !isNaN(d) ? " il " + d.toLocaleDateString("it-IT", {day: "numeric", month: "long", year: "numeric"}) : "";
+  return `<div class="row" style="align-items:center"><p class="meta" style="margin:0;flex:1">Foto delle attività: ${c ? `hai dato il consenso${quando}` : `non hai dato il consenso${quando}`}.</p>
+    <button class="btn ghost sm" data-act="consenso-foto" data-v="${c ? "no" : "si"}">${c ? "Revoca il consenso" : "Dai il consenso"}</button></div>`;
+}
+async function impostaConsensoFoto(si) {
+  const utente = S.myId;
+  try {
+    const {data, error} = await S.sb.rpc("imposta_consenso_foto", {p_consenso: si});
+    if (error || data !== "ok") throw error || new Error("risposta inattesa");
+  } catch (e) { console.error(e); toast("Non sono riuscito a salvare la tua scelta. Riprova."); return; }
+  if (S.myId !== utente || !S.profilo) return;
+  S.profilo.consenso_foto = si; S.profilo.consenso_foto_il = new Date().toISOString();
+  render();
+  toast(si ? "Grazie: consenso alle foto registrato." : "Scelta registrata: non comparirai nelle foto pubblicate.");
 }
 
 function vAttivita() {
@@ -760,7 +794,7 @@ function vSoci() {
     const ps = S.profili.filter(p => p.ruolo === r);
     if (!ps.length && r !== "in_attesa") return "";
     return `<div class="box"><h3>${t} · ${ps.length}</h3><div class="plist">${ps.length ? ps.map(p => `
-      <div class="prow col"><div class="who"><span class="n">${esc(p.nome || "Senza nome")}</span><small>${esc(p.telefono)}</small></div>
+      <div class="prow col"><div class="who"><span class="n">${esc(p.nome || "Senza nome")}</span><small>${esc(p.telefono)}${r !== "in_attesa" && "consenso_foto" in p ? ` · foto: ${p.consenso_foto === true ? "sì" : p.consenso_foto === false ? "no" : "non ha risposto"}` : ""}</small></div>
       <div class="row">
         ${r === "in_attesa" ? `<button class="btn sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Approva</button><button class="btn danger sm" data-act="rifiuta" data-id="${p.id}">Rifiuta</button>` : ""}
         ${pres && r === "socio" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="direttivo">Nel direttivo</button>` : ""}
@@ -1183,7 +1217,9 @@ function thumb(f, eid, i) {
 }
 function bottoneCarica(eid) {
   if (!can("socio")) return "";
-  return `<label class="btn ghost block" style="cursor:pointer"><input type="file" accept="image/*" multiple class="sr" data-carica="${eid}">+ Aggiungi le tue foto</label>
+  const ok = !!S.dichiaraFoto;
+  return `<label class="check"><input type="checkbox" data-dichiara-foto style="flex:none" ${ok ? "checked" : ""}> <span>Confermo che le persone riconoscibili nelle foto sono d'accordo (per i bambini, i genitori). Se qualcuno lo chiede, la foto verrà tolta.</span></label>
+    <label class="btn ghost block" style="cursor:${ok ? "pointer" : "not-allowed"};opacity:${ok ? 1 : .55}" data-carica-etichetta><input type="file" accept="image/*" multiple class="sr" data-carica="${eid}" ${ok ? "" : "disabled"}>+ Aggiungi le tue foto</label>
     <span class="meta" id="up-${eid}" aria-live="polite"></span>`;
 }
 function boxFoto(e) {
@@ -1221,6 +1257,7 @@ function ultimeFoto() {
     <div class="grid3">${ult.map(f => thumb(f, f.attivita_id, fotoDi(f.attivita_id).indexOf(f))).join("")}</div></section>`;
 }
 async function caricaFoto(eid, files) {
+  if (!S.dichiaraFoto) { toast("Prima conferma che le persone nelle foto sono d'accordo."); return; }
   const max = can("direttivo") ? 100 : 20;
   const lista = [...files].slice(0, max), out = () => $("#up-" + eid);
   let ok = 0;
@@ -1232,7 +1269,7 @@ async function caricaFoto(eid, files) {
     try {
       // Le foto delle gallerie vanno nel bucket privato, senza URL pubblico
       r = await api.carica(lista[i], true, BKT_GAL);
-      await api.ins("foto", {attivita_id: eid, user_id: utente, autore: S.myName, url: S.live ? "" : r.url, percorso: r.percorso, bucket: r.bucket, didascalia: ""});
+      await api.ins("foto", {attivita_id: eid, user_id: utente, autore: S.myName, url: S.live ? "" : r.url, percorso: r.percorso, bucket: r.bucket, didascalia: "", consenso_dichiarato: true});
       ok++;
     } catch (e) {
       console.error(e);
@@ -1332,6 +1369,7 @@ document.addEventListener("click", async ev => {
     case "role": return sceltaRuolo();
     case "setrole": S.viewRole = t.dataset.v; if (S.tab === "gestione" && !can("direttivo")) S.tab = "home"; closeSheet(); render(); return;
     case "esci": if (S.live) await S.sb.auth.signOut(); return;
+    case "consenso-foto": return impostaConsensoFoto(t.dataset.v === "si");
     case "ricarica": await caricaProfilo(); return;
     case "form-evento": return formEvento(id);
     case "form-assemblea": return formAssemblea(id);
@@ -1410,6 +1448,13 @@ document.addEventListener("keydown", ev => {
   if (ev.key === "Escape" && $("#sheet").innerHTML) closeSheet();
 });
 document.addEventListener("change", ev => {
+  if (ev.target.matches("[data-dichiara-foto]")) {
+    S.dichiaraFoto = ev.target.checked;
+    document.querySelectorAll("[data-dichiara-foto]").forEach(c => { c.checked = S.dichiaraFoto; });
+    document.querySelectorAll("[data-carica]").forEach(i => { i.disabled = !S.dichiaraFoto; });
+    document.querySelectorAll("[data-carica-etichetta]").forEach(l => { l.style.opacity = S.dichiaraFoto ? 1 : .55; l.style.cursor = S.dichiaraFoto ? "pointer" : "not-allowed"; });
+    return;
+  }
   const el = ev.target.closest("[data-carica]"); if (el && el.files.length) { caricaFoto(el.dataset.carica, el.files); el.value = ""; }
   if (ev.target.id === "impFile") return leggiFileImport(ev.target.files[0]);
   if (!IMP || !IMP.esito) return;
@@ -1473,7 +1518,7 @@ setInterval(() => { rinnovaFoto().catch(console.error); }, 60 * 1000);
 function azzeraDatiSessione() {
   S._versioneCarica = (S._versioneCarica || 0) + 1;
   S.realRole = S.viewRole = "lettore";
-  S.myId = null; S.myName = ""; S.profilo = null;
+  S.myId = null; S.myName = ""; S.profilo = null; S.dichiaraFoto = false;
   S.reg = null;  // stato della registrazione (contiene il gettone monouso)
   S.foto = []; S.fotoErrore = false; S.fotoScartate = 0;
   S._fotoDaFirmare = []; S._fotoFirmateAlle = 0;
