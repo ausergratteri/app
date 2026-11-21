@@ -63,7 +63,7 @@ scenario migrato $T/00_stub_supabase.sql "$TMP/schema_vecchio.sql" $T/10_dati_pr
   supabase/migrations/20261118_sicurezza_accessi.sql supabase/migrations/20261119_importa_tesserati.sql \
   supabase/migrations/20261120_foto_private.sql supabase/migrations/20261121_permessi_foto_ruoli.sql \
   supabase/migrations/20261122_correzioni_retest.sql supabase/migrations/20261123_registrazione_otp.sql \
-  supabase/migrations/20261124_minimo_privilegio_tabelle.sql supabase/migrations/20261125_strumenti_presidente.sql supabase/migrations/20261126_consenso_foto.sql $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
+  supabase/migrations/20261124_minimo_privilegio_tabelle.sql supabase/migrations/20261125_strumenti_presidente.sql supabase/migrations/20261126_consenso_foto.sql supabase/migrations/20261127_otp_15_minuti.sql supabase/migrations/20261128_ex_soci.sql $T/20_test_accessi.sql $T/25_test_posti.sql $T/30_test_importazione.sql $T/40_test_foto_private.sql \
   $T/45_test_permessi_foto.sql $T/46_test_correzioni_retest.sql $T/47_test_registrazione_otp.sql $T/48_test_minimo_privilegio.sql $T/49_test_strumenti_presidente.sql $T/55_test_consenso_foto.sql | tee "$TMP/2.txt" | grep -v '^PASS' || true
 echo "   $(grep -c '^PASS' "$TMP/2.txt") PASS, $(grep -c '^FAIL' "$TMP/2.txt" || true) FAIL"
 
@@ -225,6 +225,10 @@ docker exec "$NOME" createdb -U postgres concorrenza_otp
 cat $T/00_stub_supabase.sql supabase/schema.sql $T/10_dati_prova.sql | docker exec -i -e PGOPTIONS="-c client_min_messages=warning" "$NOME" psql -U postgres -d concorrenza_otp -v ON_ERROR_STOP=1 -q -X >/dev/null
 bash $T/concorrenza_otp.sh "$NOME" concorrenza_otp > "$TMP/10.txt" 2>&1 || true
 sed 's/^/   /' "$TMP/10.txt"
+
+echo "== 11. Ex soci: revoca dell'accesso, attribuzione e riattivazione"
+q nuovo < "$T/56_test_ex_soci.sql"
+q migrato < "$T/56_test_ex_soci.sql"
 
 if grep -q '^FAIL' "$TMP/1.txt" "$TMP/2.txt" "$TMP/4.txt" "$TMP/5.txt" "$TMP/6.txt" "$TMP/7.txt" "$TMP/8.txt" "$TMP/9.txt" "$TMP/10.txt" || [ "$(grep -c '^PASS' "$TMP/10.txt")" != 3 ] || ! grep -q '^PASS' "$TMP/9.txt" || ! grep -q '^PASS' "$TMP/1.txt" || ! grep -q '^PASS' "$TMP/2.txt" \
    || ! grep -q '^PASS' "$TMP/4.txt" || ! grep -q '^PASS' "$TMP/5.txt" || ! grep -q '^PASS' "$TMP/6.txt" || ! grep -q '^PASS' "$TMP/7.txt" || ! grep -q '^PASS' "$TMP/8.txt"; then

@@ -290,6 +290,14 @@ function testata(saluto, sotto, conRuolo) {
 function render() {
   // Non ancora entrato
   if (S.live && !S.sessione) { $("#tabs").innerHTML = ""; $("#app").innerHTML = testata("Benvenuto in Auser", cfg().motto || "L'app dei soci.", false) + vAccesso(); return; }
+  if (S.live && S.profilo?.ex_socio_dal) {
+    $("#tabs").innerHTML = "";
+    $("#app").innerHTML = testata("Accesso sospeso", "Il tesseramento risulta concluso.", false) +
+      `<main><div class="box"><p>Per rinnovare il tesseramento o per richieste sui tuoi dati, contatta il direttivo.</p>
+      <p><a href="privacy.html">Informativa privacy</a></p>
+      <button class="btn ghost" data-act="esci">Esci</button></div></main>`;
+    return;
+  }
   // Entrato ma non ancora approvato
   if (S.live && S.realRole === "lettore" && !S.loading) {
     $("#tabs").innerHTML = "";
@@ -789,19 +797,21 @@ function vAssemblea(a) {
 /* ---------- Soci e ruoli ---------- */
 function vSoci() {
   const pres = can("presidente");
-  const gruppi = [["in_attesa","Da approvare"],["direttivo","Direttivo"],["socio","Soci"],["presidente","Presidente"]];
+  const gruppi = [["in_attesa","Da approvare"],["direttivo","Direttivo"],["socio","Soci"],["presidente","Presidente"],["ex_socio","Ex soci"]];
   return gruppi.map(([r, t]) => {
-    const ps = S.profili.filter(p => p.ruolo === r);
-    if (!ps.length && r !== "in_attesa") return "";
+    const ps = S.profili.filter(p => (p.ex_socio_dal ? "ex_socio" : p.ruolo) === r);
+    if (!ps.length && r !== "in_attesa" && r !== "ex_socio") return "";
     return `<div class="box"><h3>${t} · ${ps.length}</h3><div class="plist">${ps.length ? ps.map(p => `
-      <div class="prow col"><div class="who"><span class="n">${esc(p.nome || "Senza nome")}</span><small>${esc(p.telefono)}${r !== "in_attesa" && "consenso_foto" in p ? ` · foto: ${p.consenso_foto === true ? "sì" : p.consenso_foto === false ? "no" : "non ha risposto"}` : ""}</small></div>
+      <div class="prow col"><div class="who"><span class="n">${esc(p.nome || "Senza nome")}</span><small>${esc(p.telefono)}${r !== "in_attesa" && "consenso_foto" in p ? ` · foto: ${p.consenso_foto === true ? "sì" : p.consenso_foto === false ? "no" : "non ha risposto"}` : ""}${p.ex_socio_dal ? " · dal " + esc(fmtLongY(p.ex_socio_dal.slice(0, 10))) : ""}</small></div>
       <div class="row">
         ${r === "in_attesa" ? `<button class="btn sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Approva</button><button class="btn danger sm" data-act="rifiuta" data-id="${p.id}">Rifiuta</button>` : ""}
         ${pres && r === "socio" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="direttivo">Nel direttivo</button>` : ""}
         ${pres && r === "direttivo" ? `<button class="btn ghost sm" data-act="ruolo" data-id="${p.id}" data-v="socio">Togli dal direttivo</button>` : ""}
-        ${r !== "presidente" && (pres || r !== "direttivo") ? `<button class="btn ghost sm" data-act="pin" data-id="${p.id}">Nuovo PIN</button>` : ""}
-        ${pres && r !== "presidente" && p.id !== S.myId ? `<button class="btn ghost sm" data-act="azzera-accesso" data-id="${p.id}">Azzera primo accesso</button>` : ""}
-      </div></div>`).join("") : '<div class="empty">Nessuna richiesta.</div>'}</div></div>`;
+        ${pres && S.live && "ex_socio_dal" in p && ["socio", "direttivo"].includes(r) ? `<button class="btn ghost sm" data-act="ex-socio" data-id="${p.id}">Sposta in Ex soci</button>` : ""}
+        ${pres && r === "ex_socio" ? `<button class="btn ghost sm" data-act="riattiva-socio" data-id="${p.id}">Riattiva come socio</button>` : ""}
+        ${r !== "presidente" && r !== "ex_socio" && (pres || r !== "direttivo") ? `<button class="btn ghost sm" data-act="pin" data-id="${p.id}">Nuovo PIN</button>` : ""}
+        ${pres && r !== "presidente" && r !== "ex_socio" && p.id !== S.myId ? `<button class="btn ghost sm" data-act="azzera-accesso" data-id="${p.id}">Azzera primo accesso</button>` : ""}
+      </div></div>`).join("") : `<div class="empty">${r === "ex_socio" ? "Nessun ex socio." : "Nessuna richiesta."}</div>`}</div></div>`;
   }).join("") + vTesserati() + `<p class="meta" style="margin:0">Chi non usa lo smartphone non serve registrarlo: lo aggiungi direttamente tra i partecipanti di ogni gita.</p>`;
 }
 
@@ -1218,7 +1228,7 @@ function thumb(f, eid, i) {
 function bottoneCarica(eid) {
   if (!can("socio")) return "";
   const ok = !!S.dichiaraFoto;
-  return `<label class="check"><input type="checkbox" data-dichiara-foto style="flex:none" ${ok ? "checked" : ""}> <span>Confermo che le persone riconoscibili nelle foto sono d'accordo (per i bambini, i genitori). Se qualcuno lo chiede, la foto verrà tolta.</span></label>
+  return `<label class="check"><input type="checkbox" data-dichiara-foto style="flex:none" ${ok ? "checked" : ""}> <span>Confermo di avere il consenso delle persone riconoscibili in tutte le foto di questo caricamento e, per i minori, di chi esercita la responsabilità genitoriale.</span></label>
     <label class="btn ghost block" style="cursor:${ok ? "pointer" : "not-allowed"};opacity:${ok ? 1 : .55}" data-carica-etichetta><input type="file" accept="image/*" multiple class="sr" data-carica="${eid}" ${ok ? "" : "disabled"}>+ Aggiungi le tue foto</label>
     <span class="meta" id="up-${eid}" aria-live="polite"></span>`;
 }
@@ -1256,10 +1266,18 @@ function ultimeFoto() {
   return `<section class="sec"><div class="sechead"><h2>Ultime foto</h2><button class="link" data-act="gallerie">Tutte le gallerie</button></div>
     <div class="grid3">${ult.map(f => thumb(f, f.attivita_id, fotoDi(f.attivita_id).indexOf(f))).join("")}</div></section>`;
 }
+function aggiornaDichiarazioneFoto(confermata) {
+  S.dichiaraFoto = confermata;
+  document.querySelectorAll("[data-dichiara-foto]").forEach(c => { c.checked = S.dichiaraFoto; });
+  document.querySelectorAll("[data-carica]").forEach(i => { i.disabled = !S.dichiaraFoto; });
+  document.querySelectorAll("[data-carica-etichetta]").forEach(l => { l.style.opacity = S.dichiaraFoto ? 1 : .55; l.style.cursor = S.dichiaraFoto ? "pointer" : "not-allowed"; });
+}
 async function caricaFoto(eid, files) {
   if (!S.dichiaraFoto) { toast("Prima conferma che le persone nelle foto sono d'accordo."); return; }
   const max = can("direttivo") ? 100 : 20;
   const lista = [...files].slice(0, max), out = () => $("#up-" + eid);
+  if (!lista.length) return;
+  aggiornaDichiarazioneFoto(false);
   let ok = 0;
   const utente = S.myId;
   for (let i = 0; i < lista.length; i++) {
@@ -1293,12 +1311,16 @@ function disegnaLB() {
   LB.i = (LB.i + fs.length) % fs.length;
   const f = fs[LB.i], e = trova(LB.eid);
   const puo = (f.user_id && f.user_id === S.myId) || can("direttivo");
+  const autoreRiservato = can("direttivo") && f.autore === "ex socio"
+    ? S.profili.find(p => p.id === f.user_id && p.ex_socio_dal)?.nome
+    : "";
   $("#lightbox").innerHTML = `<div class="lb" role="dialog" aria-modal="true" aria-label="Foto ${LB.i + 1} di ${fs.length}">
     <div class="lbtop"><span>${LB.i + 1} / ${fs.length}</span><button class="close" data-act="lb-chiudi">Chiudi</button></div>
     <div class="lbimg" id="lbimg">${fs.length > 1 ? '<button class="lbnav" data-act="lb-prev" aria-label="Foto precedente">‹</button>' : ""}
       <img src="${esc(f.url)}" alt="${esc(f.didascalia || "Foto: " + (e ? e.titolo : ""))}">
       ${fs.length > 1 ? '<button class="lbnav" data-act="lb-next" aria-label="Foto successiva">›</button>' : ""}</div>
     <div class="lbinfo"><b>${esc(e ? e.titolo : "")}</b>${f.didascalia ? `<p>${esc(f.didascalia)}</p>` : ""}<small>${f.autore ? "Foto di " + esc(f.autore) : ""}${fs.length > 1 ? " · scorri per le altre" : ""}</small>
+      ${autoreRiservato ? `<p class="meta">Caricata da ${esc(autoreRiservato)} · visibile al direttivo</p>` : ""}
       ${puo ? `<div class="row"><button class="btn ghost sm" data-act="lb-dida">${f.didascalia ? "Modifica didascalia" : "Aggiungi didascalia"}</button><button class="btn danger sm" data-act="lb-elimina" data-id="${f.id}">Elimina</button></div>
       <form id="fDida" hidden><input type="text" id="dida" value="${esc(f.didascalia)}" placeholder="Scrivi una didascalia" aria-label="Didascalia"><button class="btn sm" type="submit">Salva</button></form>` : ""}
     </div></div>`;
@@ -1384,6 +1406,13 @@ document.addEventListener("click", async ev => {
     case "elimina": if (!conferma("Tocca di nuovo per eliminare")) return;
       if (await safe(() => api.del(t.dataset.tab, id), "Eliminato")) closeSheet(); return;
     case "soci": return openView("soci");
+    case "ex-socio": case "riattiva-socio": {
+      const uscita = a === "ex-socio";
+      if (!conferma(uscita ? "Conferma: revoca accesso" : "Conferma riattivazione")) return;
+      if (await safe(() => api.rpc("imposta_ex_socio", {p_utente: id, p_ex_socio: uscita}),
+        uscita ? "Spostato in Ex soci" : "Accesso riattivato come socio")) openView("soci");
+      return;
+    }
     case "ruolo": if (await safe(() => api.upd("profili", id, {ruolo: t.dataset.v}), t.dataset.v === "direttivo" ? "Aggiunto al direttivo" : "Fatto")) openView("soci"); return;
     case "rifiuta": if (!conferma("Tocca di nuovo per rifiutare")) return;
       if (await safe(() => api.del("profili", id), "Richiesta rifiutata")) openView("soci"); return;
@@ -1449,10 +1478,7 @@ document.addEventListener("keydown", ev => {
 });
 document.addEventListener("change", ev => {
   if (ev.target.matches("[data-dichiara-foto]")) {
-    S.dichiaraFoto = ev.target.checked;
-    document.querySelectorAll("[data-dichiara-foto]").forEach(c => { c.checked = S.dichiaraFoto; });
-    document.querySelectorAll("[data-carica]").forEach(i => { i.disabled = !S.dichiaraFoto; });
-    document.querySelectorAll("[data-carica-etichetta]").forEach(l => { l.style.opacity = S.dichiaraFoto ? 1 : .55; l.style.cursor = S.dichiaraFoto ? "pointer" : "not-allowed"; });
+    aggiornaDichiarazioneFoto(ev.target.checked);
     return;
   }
   const el = ev.target.closest("[data-carica]"); if (el && el.files.length) { caricaFoto(el.dataset.carica, el.files); el.value = ""; }
@@ -1462,7 +1488,27 @@ document.addEventListener("change", ev => {
   if (ev.target.dataset.impAgg) { const n = Number(ev.target.dataset.impAgg); if (ev.target.checked) IMP.aggiorna.add(n); else IMP.aggiorna.delete(n); return aggiornaBottoneImport(); }
   if (ev.target.id === "impVuoti") { IMP.completaVuoti = ev.target.checked; return aggiornaBottoneImport(); }
 });
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.live && RANK[S.realRole] >= 1) carica().catch(() => {}); });
+async function controllaAccessoSocio() {
+  const utente = S.sessione?.user?.id;
+  if (!S.live || !utente || RANK[S.realRole] < 1) return false;
+  // Su database precedenti la colonna non esiste ancora.
+  if (!S.profilo || !("ex_socio_dal" in S.profilo)) return true;
+  const {data, error} = await S.sb.from("profili").select("ex_socio_dal").eq("id", utente).maybeSingle();
+  if (S.sessione?.user?.id !== utente || RANK[S.realRole] < 1) return false;
+  if (error) return false;
+  if (data && !data.ex_socio_dal) return true;
+  azzeraDatiSessione();
+  closeSheet();
+  chiudiLB();
+  S.profilo = data;
+  S.loading = false;
+  render();
+  return false;
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") controllaAccessoSocio().then(ok => ok && carica()).catch(() => {});
+});
 
 
 // Rinnova soltanto gli URL delle foto, senza ricaricare tutto il database.
@@ -1508,7 +1554,7 @@ async function rinnovaFoto() {
 }
 
 // Controllo leggero ogni minuto; senza sessione non esegue richieste.
-setInterval(() => { rinnovaFoto().catch(console.error); }, 60 * 1000);
+setInterval(() => { controllaAccessoSocio().then(ok => ok && rinnovaFoto()).catch(console.error); }, 60 * 1000);
 
 /* =====================================================================
    Avvio
@@ -1545,7 +1591,7 @@ async function caricaProfilo() {
   }
   S.profilo = data;
   S.myName = data?.nome || u.user_metadata?.nome || "";
-  const r = data?.ruolo;
+  const r = data?.ex_socio_dal ? null : data?.ruolo;
   S.realRole = r === "presidente" ? "presidente" : r === "direttivo" ? "direttivo" : r === "socio" ? "socio" : "lettore";
   S.viewRole = S.realRole;
   if (RANK[S.realRole] >= 1) { S.loading = true; render(); try { await carica(); } catch (e) { S.loading = false; S.note = "Non riesco a leggere i dati. Controlla la connessione e riapri l'app."; render(); } }
