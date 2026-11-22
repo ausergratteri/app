@@ -436,7 +436,7 @@ test("SMTP: index.ts crea il trasporto solo con configurazione valida, verifica 
   assert.match(src, /if \(!verificaIpSmtp\(r\.map\(x => x\.address\), ipAtteso\)\) throw new Error\("smtp_ip_non_atteso"\);/);
   assert.match(src, /nodemailer\.createTransport\(opzioniPosta\(ipAtteso, porta, false\)\)/, "connessione all'IP verificato, non al nome");
   assert.match(src, /if \(SMTP\.ok && ambiente\("DIAGNOSI_SMTP"\) === "1"\)/);
-  assert.match(src, /if \(!SMTP\.ok \|\| !URL_PROGETTO/);
+  assert.match(src, /: SMTP\.ok && ambiente\("GMAIL_UTENTE"\) && ambiente\("GMAIL_PASSWORD_APP"\)/);
   assert.match(src, /const t = await trasporto\(\);\s*if \(!t\) throw new Error\("smtp_non_configurato"\);/);
   assert.ok(!/host:\s*"smtp\.gmail\.com"/.test(src), "nessun host scritto direttamente nel trasporto");
   assert.ok(!/log\([^)]*ipAtteso/.test(src) && !/log\([^)]*address/.test(src), "nessun IP nei registri");
@@ -477,5 +477,5 @@ test("chiave: index.ts usa chiaveServizio, registra solo la fonte e risponde 503
   assert.ok(!/ambiente\("SUPABASE_(SECRET_KEY|SERVICE_ROLE_KEY|SECRET_KEYS)"\)/.test(src), "nessuna lettura diretta delle chiavi in index.ts");
   const righeLog = src.split("\n").filter(r => /\blog\(/.test(r));
   assert.ok(righeLog.length > 0 && righeLog.every(r => !/(^|[^_A-Za-z])CHIAVE\b/.test(r) && !/\bambiente\("SUPABASE_/.test(r)), "la chiave non finisce nei registri");
-  assert.match(src, /if \(!SMTP\.ok \|\| !URL_PROGETTO \|\| !CHIAVE \|\|/);
+  assert.match(src, /if \(!postaConfigurata \|\| !URL_PROGETTO \|\| !CHIAVE \|\|/);
 });

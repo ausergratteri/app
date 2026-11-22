@@ -8,6 +8,10 @@
 //    REGISTRAZIONE_PEPE      almeno 32 caratteri casuali: chiave HMAC per codici e IP
 //    GMAIL_UTENTE            indirizzo Gmail dell'associazione (mittente)
 //    GMAIL_PASSWORD_APP      password per le app di Google (16 caratteri), non la password dell'account
+//    BREVO_API_KEY           chiave Brevo per invii transazionali via HTTPS
+//    BREVO_MITTENTE          indirizzo del mittente verificato in Brevo
+//    BREVO_DESTINATARI_TEST  elenco esatto separato da virgole, solo per il collaudo
+//    BREVO_ATTIVO            "1": usa Brevo per tutti i destinatari autorizzati
 //    EMAIL_CONSENTITE        (facoltativo) elenco separato da virgole: se presente, si scrive SOLO lì
 //    ORIGINE_CONSENTITA      (facoltativo) es. https://ausergratteri.github.io
 //    DIAGNOSI_SMTP           (facoltativo) "1": all'avvio prova connessione e accesso al server
@@ -33,6 +37,11 @@ console.log(JSON.stringify({funzione: "registrazione", evento: "chiave_servizio"
 const PEPE = ambiente("REGISTRAZIONE_PEPE");
 const ORIGINE = ambiente("ORIGINE_CONSENTITA") || "https://ausergratteri.github.io";
 const CONSENTITE = ambiente("EMAIL_CONSENTITE").split(",").map(x => x.trim().toLowerCase()).filter(Boolean);
+const BREVO_CHIAVE = ambiente("BREVO_API_KEY");
+const BREVO_MITTENTE = ambiente("BREVO_MITTENTE").trim();
+const BREVO_ATTIVO = ambiente("BREVO_ATTIVO") === "1";
+const BREVO_DESTINATARI_TEST = new Set(ambiente("BREVO_DESTINATARI_TEST")
+  .split(",").map(email => email.trim().toLowerCase()).filter(Boolean));
 const DOMINIO = "soci.ausergratteri.app";   // uguale a DOMINIO_FINTO in app.js e in nuovo_profilo()
 const MAX_CORPO = 4096;
 
@@ -81,6 +90,24 @@ const dip: Dip = {
     return error ? {errore: error.code || "errore"} : {id: data.user?.id};
   },
   async inviaEmail(m) {
+    if (BREVO_ATTIVO || BREVO_DESTINATARI_TEST.has(m.a.trim().toLowerCase())) {
+      if (!BREVO_CHIAVE || !BREVO_MITTENTE) throw new Error("brevo_non_configurato");
+      const risposta = await fetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+        headers: {"Content-Type": "application/json", "api-key": BREVO_CHIAVE},
+        body: JSON.stringify({
+          sender: {name: "AUSER Gratteri", email: BREVO_MITTENTE},
+          to: [{email: m.a, removeTrackingPixel: true}],
+          subject: m.oggetto,
+          textContent: m.testo
+        })
+      });
+      if (risposta.body) await risposta.body.cancel();
+      if (!risposta.ok) throw new Error(`brevo_http_${risposta.status}`);
+      return;
+    }
     const t = await trasporto();
     if (!t) throw new Error("smtp_non_configurato");
     await t.sendMail({
@@ -124,7 +151,10 @@ Deno.serve(async req => {
   if (req.method === "OPTIONS") return new Response(null, {status: 204, headers: intestazioni(origine)});
   const h = intestazioni(origine);
   if (req.method !== "POST") return new Response('{"esito":"metodo_non_consentito"}', {status: 405, headers: h});
-  if (!SMTP.ok || !URL_PROGETTO || !CHIAVE || !chiaveHmac || !ambiente("GMAIL_UTENTE") || !ambiente("GMAIL_PASSWORD_APP")) {
+  const postaConfigurata = BREVO_ATTIVO
+    ? BREVO_CHIAVE && BREVO_MITTENTE
+    : SMTP.ok && ambiente("GMAIL_UTENTE") && ambiente("GMAIL_PASSWORD_APP");
+  if (!postaConfigurata || !URL_PROGETTO || !CHIAVE || !chiaveHmac) {
     dip.log("configurazione_incompleta");
     return new Response('{"esito":"non_disponibile"}', {status: 503, headers: h});
   }

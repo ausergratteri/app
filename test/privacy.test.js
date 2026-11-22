@@ -47,7 +47,7 @@ test("privacy.html: pagina statica senza script né risorse esterne, con i conte
   assert.match(p, /script-src 'none'/);
   assert.ok(!/<script/i.test(p), "nessuno script");
   for (const m of p.matchAll(/(?:src|href)="([^"]+)"/g)) assert.ok(!/^https?:/.test(m[1]), `risorsa esterna: ${m[1]}`);
-  for (const t of ["titolare del trattamento", "Supabase", "GitHub", "Google", "Garante", "conserviamo", "diritti", "minori"]) {
+  for (const t of ["titolare del trattamento", "Supabase", "GitHub", "Brevo", "Garante", "conserviamo", "diritti", "minori"]) {
     assert.ok(p.toLowerCase().includes(t.toLowerCase()), t);
   }
 });
