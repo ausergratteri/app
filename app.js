@@ -233,9 +233,27 @@ function partecipanti(eid) {
   })).sort((a, b) => (a.quando || "").localeCompare(b.quando || ""));
   // Map e non {}: un nome come "constructor" non deve trovare le proprietà ereditate di Object
   const seen = new Map();
-  out.forEach((p, i) => [...(p.io ? [p.nome] : []), ...p.acc.map(x => x.nome)].forEach(n => { const k = norm(n); if (k) { if (!seen.has(k)) seen.set(k, []); seen.get(k).push({i, n}); } }));
-  out.forEach(p => p.dups = []);
-  [...seen.values()].forEach(arr => { if (arr.length > 1) arr.forEach(({i, n}) => { if (!out[i].dups.includes(n)) out[i].dups.push(n); }); });
+  out.forEach(p => {
+    p.dups = [];
+    const nomi = p.acc.map(a => ({nome: a.nome, uid: null}));
+    if (p.io) nomi.push({nome: p.nome, uid: p.uid});
+    for (const {nome, uid} of nomi) {
+      const chiave = norm(nome);
+      if (!chiave) continue;
+      if (!seen.has(chiave)) seen.set(chiave, []);
+      seen.get(chiave).push({p, nome, uid});
+    }
+  });
+  for (const gruppo of seen.values()) {
+    if (gruppo.length < 2) continue;
+    const account = new Map();
+    for (const {uid} of gruppo) account.set(uid, (account.get(uid) || 0) + 1);
+    // Basta un nominativo senza account per lasciare aperta la verifica dell'omonimia.
+    const senzaAccount = gruppo.some(voce => !voce.uid);
+    for (const {p, nome, uid} of gruppo) {
+      if ((senzaAccount || account.get(uid) > 1) && !p.dups.includes(nome)) p.dups.push(nome);
+    }
+  }
   return out;
 }
 const persone = p => (p.io ? 1 : 0) + (p.acc || []).length;
@@ -509,7 +527,7 @@ async function regManuale(ev) {
 }
 
 /* ---------- Card e pagine ---------- */
-function card(e) {
+function card(e, {mostraDoppioni = false} = {}) {
   const tot = totale(e.id), m = mia(e.id);
   const posti = e.posti ? Number(e.posti) : 0;
   const pct = posti ? Math.min(100, Math.round(tot / posti * 100)) : 0;
@@ -518,7 +536,7 @@ function card(e) {
   return `<button class="card t-${e.tipo}" data-act="open" data-k="${e.tipo === "assemblea" ? "assemblea" : "evento"}" data-id="${e.id}">
     <div class="date"><b>${dayN(e.data)}</b><span>${monS(e.data)}</span></div>
     <div class="cbody">
-      <div class="pills"><span class="pill ${e.tipo}">${TIPI[e.tipo] || "Attività"}</span>${stato}${mine}</div>
+      <div class="pills"><span class="pill ${e.tipo}">${TIPI[e.tipo] || "Attività"}</span>${stato}${mine}${mostraDoppioni ? '<span class="pill warn">Possibili doppioni</span>' : ""}</div>
       <h3>${esc(e.titolo)}</h3>
       <div class="meta">${esc([fmtOra(e.ora), e.luogo].filter(Boolean).join(" · "))}</div>
       ${posti ? `<div class="bar ${tot >= posti ? "full" : ""}" role="img" aria-label="${tot} iscritti su ${posti} posti"><i style="width:${pct}%"></i></div><div class="meta">${tot} iscritti su ${posti} posti</div>` : (tot ? `<div class="meta">${tot} ${tot === 1 ? "persona iscritta" : "persone iscritte"}</div>` : "")}
@@ -661,6 +679,7 @@ function vBacheca() {
 function vGestione() {
   const fut = futuri(attivita()).filter(e => e.stato !== "annullata");
   const iscr = fut.reduce((s, e) => s + totale(e.id), 0);
+  const daControllare = fut.filter(e => partecipanti(e.id).some(p => p.dups.length));
   const attesa = S.profili.filter(p => p.ruolo === "in_attesa");
   const Y = '<span class="yes">✓</span>', N = '<span class="nope">–</span>';
   const rows = [["Leggere attività e bacheca",Y,Y,Y],["Iscriversi con familiari e amici",Y,Y,Y],["Creare e modificare gite ed eventi",Y,Y,N],
@@ -682,7 +701,7 @@ function vGestione() {
       ${can("presidente") ? '<button class="btn ghost" data-act="temi">Tema dell\'app</button><button class="btn ghost" data-act="form-config">Logo, nome e social</button>' : ""}
     </div></section>
   <section class="sec"><div class="sechead"><h2>Partecipanti da controllare</h2></div>
-    ${fut.length ? fut.map(card).join("") : '<div class="empty">Nessuna attività aperta.</div>'}</section>
+    ${daControllare.length ? daControllare.map(e => card(e, {mostraDoppioni: true})).join("") : '<div class="empty">Nessun possibile doppione nelle prossime attività.</div>'}</section>
   <section class="sec"><div class="sechead"><h2>Chi può fare cosa</h2></div>
     <div class="box" style="overflow-x:auto"><table class="perm"><thead><tr><th scope="col"></th><th scope="col">Presidente</th><th scope="col">Direttivo</th><th scope="col">Socio</th></tr></thead>
     <tbody>${rows.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td></tr>`).join("")}</tbody></table></div></section>`;
@@ -1258,7 +1277,7 @@ function vGallerie() {
   const tutti = [...new Set(S.foto.map(f => f.attivita_id))].map(trova).filter(Boolean).sort((a, b) => (b.data || "").localeCompare(a.data || ""));
   if (!tutti.length) return S.fotoErrore ? avvisoFoto() : '<div class="empty">Ancora nessuna foto. Si aggiungono dalla pagina di ogni gita o evento.</div>';
   const evs = perAnnoScelto("gal", tutti);
-  return filtroAnno("gal", tutti) + `<div id="sez-gal">${paginato("gal", evs, 6, l => l.map(album).join(""))}</div>`;
+  return filtroAnno("gal", tutti) + `<div id="sez-gal" class="album-list">${paginato("gal", evs, 6, l => l.map(album).join(""))}</div>`;
 }
 function ultimeFoto() {
   const ult = [...S.foto].sort((a, b) => (b.creato_il || "").localeCompare(a.creato_il || "")).slice(0, 6);
