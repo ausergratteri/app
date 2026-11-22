@@ -226,6 +226,9 @@ const futuri = arr => { const t = todayISO(); return arr.filter(e => (e.data || 
 const passati = arr => { const t = todayISO(); return arr.filter(e => (e.data || "") < t).reverse(); };
 const trova = id => S.att[id] ? S.att[id] : S.ass[id] ? comeAttivita(S.ass[id]) : null;
 
+const chiaveControlloDoppione = (eid, gruppo) => JSON.stringify(["auser-doppione-verificato", S.myId || "demo", eid, gruppo]);
+const doppioniVerificati = new Set();
+
 function partecipanti(eid) {
   const out = S.ades.filter(a => a.attivita_id === eid).map(a => ({
     id: a.id, uid: a.user_id, fonte: a.user_id ? "app" : "man", nome: a.nome, io: a.io !== false,
@@ -235,23 +238,33 @@ function partecipanti(eid) {
   const seen = new Map();
   out.forEach(p => {
     p.dups = [];
-    const nomi = p.acc.map(a => ({nome: a.nome, uid: null}));
-    if (p.io) nomi.push({nome: p.nome, uid: p.uid});
-    for (const {nome, uid} of nomi) {
+    p.gruppiDoppioni = [];
+    const nomi = p.acc.map((a, posizione) => ({nome: a.nome, uid: null, posizione}));
+    if (p.io) nomi.push({nome: p.nome, uid: p.uid, posizione: -1});
+    for (const {nome, uid, posizione} of nomi) {
       const chiave = norm(nome);
       if (!chiave) continue;
       if (!seen.has(chiave)) seen.set(chiave, []);
-      seen.get(chiave).push({p, nome, uid});
+      seen.get(chiave).push({p, nome, uid, posizione});
     }
   });
-  for (const gruppo of seen.values()) {
+  for (const [nomeConfrontato, gruppo] of seen) {
     if (gruppo.length < 2) continue;
+    const riferimento = JSON.stringify([nomeConfrontato,
+      gruppo.map(({p, uid, posizione}) => JSON.stringify([p.id, uid || "", posizione])).sort()]);
+    const chiave = chiaveControlloDoppione(eid, riferimento);
+    let verificato = doppioniVerificati.has(chiave);
+    try { verificato ||= localStorage.getItem(chiave) === "1"; } catch {}
+    if (verificato) continue;
     const account = new Map();
     for (const {uid} of gruppo) account.set(uid, (account.get(uid) || 0) + 1);
     // Basta un nominativo senza account per lasciare aperta la verifica dell'omonimia.
     const senzaAccount = gruppo.some(voce => !voce.uid);
     for (const {p, nome, uid} of gruppo) {
-      if ((senzaAccount || account.get(uid) > 1) && !p.dups.includes(nome)) p.dups.push(nome);
+      if (senzaAccount || account.get(uid) > 1) {
+        if (!p.dups.includes(nome)) p.dups.push(nome);
+        p.gruppiDoppioni.push({riferimento, nome});
+      }
     }
   }
   return out;
@@ -295,10 +308,11 @@ function applyTheme() { applicaTema(temaOra()); }
 
 function testata(saluto, sotto, conRuolo) {
   const c = cfg();
-  const conAcc = !c.logo && temaOra().logo;
-  return `<header class="top${conAcc ? " con-acc" : ""}">${decoSvg(temaOra(), "h")}
+  const tema = temaOra();
+  const conAcc = !c.logo && tema.logo;
+  return `<header class="top${conAcc ? " con-acc" : ""}${conAcc === "vecchia" ? " con-acc-alto" : ""}">${decoSvg(tema, "h")}
     <div class="toprow">
-      <div class="brand"><div class="logopill">${c.logo ? `<img alt="Auser" src="${esc(c.logo)}">` : logoSvg(temaOra())}<span class="sede">${esc(c.sede || "Gratteri")}</span></div></div>
+      <div class="brand"><div class="logopill">${c.logo ? `<img alt="Auser" src="${esc(c.logo)}">` : logoSvg(tema, true)}<span class="sede">${esc(c.sede || "Gratteri")}</span></div></div>
       <button class="iconbtn zoom" data-act="big" aria-label="Grandezza del testo: ${["normale", "grande", "molto grande"][zoomOra()]}. Tocca per cambiarla"><span aria-hidden="true">A</span><span class="zd" aria-hidden="true">${[0, 1, 2].map(i => `<i class="${i <= zoomOra() ? "on" : ""}"></i>`).join("")}</span></button>
     </div>
     <div class="hello"><h1>${saluto}</h1><p>${esc(sotto)}</p>${conRuolo ? roleChip() : ""}</div>
@@ -761,9 +775,12 @@ function myBox(e) {
 function gestionePartecipanti(e) {
   if (!can("direttivo")) return "";
   const ps = partecipanti(e.id), tot = ps.reduce((s, p) => s + persone(p), 0);
-  const dup = ps.filter(p => p.dups.length);
+  const dup = new Map(ps.flatMap(p => p.gruppiDoppioni).map(g => [g.riferimento, g.nome]));
   return `<div class="box"><h3>Partecipanti · ${tot}${e.posti ? " su " + esc(e.posti) : ""}</h3>
-    ${dup.length ? `<div class="banner warn"><span><b>Possibili doppioni:</b> ${[...new Set(dup.flatMap(p => p.dups))].map(esc).join(", ")}. Controlla e togli il nome ripetuto.</span></div>` : ""}
+    ${[...dup].map(([ref, nome]) => `<div class="banner warn controllo-doppione">
+      <span><b>Possibile doppione:</b> ${esc(nome)}</span>
+      <button class="btn ghost sm" data-act="verificato-doppione" data-id="${esc(e.id)}" data-ref="${esc(ref)}" aria-label="Non è un doppione: ${esc(nome)}">Non è un doppione</button>
+    </div>`).join("")}
     <div class="plist">${ps.length ? ps.map(p => `<div class="prow ${p.dups.length ? "dup" : ""}">
       <div class="who"><span class="n">${esc(p.nome)}${p.io ? "" : " <small>(non partecipa)</small>"}</span>
         ${p.acc.length ? `<small>Con: ${p.acc.map(a => esc(a.nome) + (a.rel ? " (" + esc(a.rel.toLowerCase()) + ")" : "")).join(", ")}</small>` : ""}
@@ -1420,6 +1437,17 @@ document.addEventListener("click", async ev => {
     case "acc+": case "acc-": { const n = Number($("#aN").textContent) + (a === "acc+" ? 1 : -1); if (n >= 0 && n <= 12) formAdesione.rows(n); return; }
     case "annulla-mia": if (!conferma("Tocca di nuovo per confermare")) return;
       if (await safe(() => api.del("adesioni", t.dataset.ref), "Iscrizione annullata")) openView(vistaDi(id), id); return;
+    case "verificato-doppione": {
+      if (!can("direttivo")) return;
+      const ref = t.dataset.ref;
+      if (!partecipanti(id).some(p => p.gruppiDoppioni.some(g => g.riferimento === ref))) return;
+      if (!conferma("Tocca di nuovo per confermare")) return;
+      const chiave = chiaveControlloDoppione(id, ref);
+      doppioniVerificati.add(chiave);
+      try { localStorage.setItem(chiave, "1"); } catch {}
+      render();
+      return openView(vistaDi(id), id, true);
+    }
     case "rimuovi-part": if (!conferma("Tocca di nuovo per confermare")) return;
       if (await safe(() => api.del("adesioni", t.dataset.ref), "Tolto dall'elenco")) openView(vistaDi(id), id); return;
     case "elimina": if (!conferma("Tocca di nuovo per eliminare")) return;
